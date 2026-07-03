@@ -1,0 +1,11 @@
+# capture-ignore-sessions.txt — individual sessions automemory will NOT capture,
+# by session UUID. Unlike capture-ignore.txt (whole folders), this excludes one
+# specific Claude Code session regardless of which project it ran in.
+#
+#   - One UUID per line, exact match against the session_id Claude Code assigns.
+#   - Blank lines and anything after a '#' are ignored (so inline notes are fine).
+#   - Checked by both reconcile-sessions.sh (backfill/grown path) and
+#     capture-worker.sh (SessionEnd path), so a listed session is never
+#     captured no matter which path would have triggered it.
+#
+# --- active exclusions below this line ---

@@ -1,0 +1,3 @@
+# vault-lint allowlist — hash-per-line, for owner-authorized bulk edits that would
+# otherwise trip the lint. One commit hash per line, optional trailing comment.
+# (empty — no allowlisted edits)

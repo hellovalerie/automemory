@@ -1,0 +1,29 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "true # DISABLED-FOR-PURGE 2026-07-30 — restore: $CLAUDE_PROJECT_DIR/system/scripts/reconcile-sessions.sh"
+          },
+          {
+            "type": "command",
+            "command": "printf 'agent-notes/: this repo keeps a stream in the agent'\"'\"'s own hand (discipline: agent-notes/README.md). If something comes up for YOU this session -- an assumption breaks, you notice a pull -- writing it there before the session ends is yours to do, signed model + version. \"Nothing came up\" is the usual truth and needs NO entry; never write one to satisfy this reminder.\\n'"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "clear|logout|prompt_input_exit|other",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "true # DISABLED-FOR-PURGE 2026-07-30 — restore: $CLAUDE_PROJECT_DIR/system/scripts/capture-session.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

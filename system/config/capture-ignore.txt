@@ -1,0 +1,31 @@
+# capture-ignore.txt — partitions (folders automemory will NOT crawl).
+#
+# Each line is a folder path. That folder AND everything under it is skipped by
+# the reconciler (system/scripts/reconcile-sessions.sh): its Claude Code sessions
+# are never captured into the vault. How matching works:
+#
+#   - One folder path per line.
+#   - Blank lines and anything after a '#' are ignored (so inline notes are fine).
+#   - A leading ~ or $HOME is expanded to your home directory.
+#   - A trailing slash is optional.
+#   - Match is by prefix: the folder itself and any subdirectory under it are
+#     partitioned. `~/Sites/work` skips `~/Sites/work` and `~/Sites/work/api`.
+#
+# One caveat, stated plainly. Claude Code stores each project under a folder named
+# after its path with every non-letter/digit flattened to '-', so `Sites/work/api`
+# (a child) and `Sites/work-api` (a sibling) become the SAME name. Matching can't
+# tell them apart, so partitioning `~/Sites/work` will ALSO skip a sibling named
+# `~/Sites/work-api` or `~/Sites/workshop`. This errs toward skipping more, never
+# less — the safe direction for a privacy filter.
+#
+# The reconciler reports how many folders it partitioned on every session start,
+# so a partition is never silent — you always see it was honoured.
+#
+# To partition a folder, add its path below (uncommented). Examples — DELETE or
+# replace these; they are illustrative, not active:
+#
+#   ~/Sites/some-client-work
+#   ~/Downloads
+#   /Users/<name>/private
+#
+# --- active partitions below this line ---
