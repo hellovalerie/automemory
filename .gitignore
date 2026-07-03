@@ -1,0 +1,7 @@
+.DS_Store
+.capture.log
+.capture-transcript.tmp
+.capture-extractor.tmp
+
+# transcript-extractor regenerable output (personal; never commit)
+transcript-extractor/parsed/
