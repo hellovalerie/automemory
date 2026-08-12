@@ -47,9 +47,27 @@ record; the next session starts oriented from the map. End-to-end, one strategy
 - **`init` editing a user-hand-edited settings.json (A8):** merge semantics + a protect step,
   not clobber. Load-bearing for "never overwrite user data."
 
-## Open before code
+## Resolved before code (2026-08-12)
 
-- **[BLOCKING]** hook→live-agent authoring mechanism (research in flight).
-- Which stream/dir Engine A records live in (records/ vs fieldnotes/ — "fieldnotes" connotes
-  Engine B's blind output).
-- MVP secret-scrub decision (above).
+- **Trigger:** Option 2 (non-disruptive live fast-path) + SessionStart reconciler backstop.
+  Stop-block forced authoring (Option 1) killed on lived experience. See ENGINE-A.md.
+- **Records dir:** `agent-records/` (ships empty).
+- **Secret-scrub:** minimal heuristic pass now, on the backfill read. Built = `redact.py`.
+
+## Build status — RESUME POINT (2026-08-12, end of day)
+
+Working tree clean; git history clean (rebuilt to July-3 anchor, force-pushed); all pushed
+to origin. Capture pipeline still QUIESCED (hooks disabled) — leave off until MVP works.
+
+Modules (in `automemory/`):
+- ✅ ① `record.py`    — envelope write + derived INDEX. Verified.
+- ✅ ② `transcript.py`— JSONL→text (stdlib port of transcript-to-text.sh). Verified (synthetic + real).
+- ✅ ③ `redact.py`    — heuristic secret-scrub, precision-first. Verified (positives + provenance-survives).
+- ⬜ ④ `dispatch.py`  — **NEXT.** Headless `claude -p` to author a record from a redacted
+  transcript. ⚠ Has a genuine external unknown (CLI invocation/flags/IO/errors) — VERIFY the
+  mechanism first (research pass or tiny probe), like the hook research, before writing.
+- ⬜ ⑤ `reconcile.py` — SessionStart: handover-in + fast-path reminder + backfill (uses ①②③④).
+- ⬜ ⑥ `cli.py`       — `init` (merge-not-clobber hooks) / `status` / `peep`.
+
+Deferred purge tail (unchanged): Gate 5 (GitHub Support blob-purge — user's call, anytime);
+destroy this session's transcript (true end of operation); re-enable capture (Gate 6, after MVP).
