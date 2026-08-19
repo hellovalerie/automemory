@@ -141,10 +141,16 @@ def record_exists_for_session(records_dir, session_ref: str) -> bool:
 def rebuild_index(records_dir, index_path, records_link_prefix: str = "agent-records") -> Path:
     """Regenerate INDEX.md from every record's frontmatter, newest-first."""
     records_dir = Path(records_dir)
+    index_name = Path(index_path).name
     entries = []
     if records_dir.is_dir():
         for p in sorted(records_dir.glob("*.md")):
-            entries.append(_fm_parse(p.read_text(encoding="utf-8")))
+            if p.name == index_name:
+                continue  # the index lives among the records; never index itself
+            fm = _fm_parse(p.read_text(encoding="utf-8"))
+            if not fm.get("id"):
+                continue  # skip non-record markdown (no envelope frontmatter)
+            entries.append(fm)
     entries.sort(
         key=lambda f: (f.get("occurred", ""), f.get("captured", "")), reverse=True
     )
@@ -164,7 +170,8 @@ def rebuild_index(records_dir, index_path, records_link_prefix: str = "agent-rec
             occurred = f.get("occurred", "")
             subj = f.get("subject", "")
             tail = " · ".join(x for x in (occurred, subj) if x)
-            lines.append(f"- [{title}]({records_link_prefix}/{rid}.md) — {tail}")
+            link = f"{records_link_prefix}/{rid}.md" if records_link_prefix else f"{rid}.md"
+            lines.append(f"- [{title}]({link}) — {tail}")
 
     index_path = Path(index_path)
     index_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
