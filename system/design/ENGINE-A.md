@@ -203,6 +203,27 @@ whole reconcile.
   limit stated. The fast path authors prose directly (no raw re-read) so the redaction bites
   specifically at backfill.
 
+## Storage & backfill — RESOLVED 2026-08-13 (built)
+
+- **Storage is per-project:** records live in `<project>/agent-records/` — co-located in
+  whatever project runs the engine (`butterfly-murder/agent-records/`, etc.). The map is
+  `<project>/agent-records/INDEX.md`. `~/.automemory/` is for global **config**, not records.
+  (This repo is the trippy case: it's both the engine's construction AND a project it
+  records, so `agent-records/` here holds automemory's own dev records — gitignored so the
+  product still ships clean.)
+- **Backfill cap N=5** at SessionStart (bounded, non-interactive); older pending → deferred
+  with a notice pointing at `automemory process` (the interactive/bulk path).
+- **Authoring:** ships as a prompt file (`system/engine/prompts/record-author.md`), cheap
+  scribe model (haiku). Output is **validated against the record contract** (must have a
+  non-empty `## Done`, or the sentinel `NO-RECORD`); malformed → retry once → else skip +
+  log (no malformed records stored). This is the mitigation for weak/non-Anthropic model
+  stochasticity — reliability comes from the validation gate, not the prompt.
+- **Dispatch plumbing (learned the hard way, verified):** the transcript is **inlined into
+  the prompt with `BEGIN/END TRANSCRIPT` delimiters + a "completed session, summarize don't
+  act" frame**, and the call runs in a **neutral cwd**. Piping the transcript on stdin was
+  unreliable (model failed to recognize it / tried to act on it); loading the host repo's
+  cwd leaked project context into the record.
+
 ## Doc debt
 
 `FOR-THE-NEXT-CLAUDE.md` currently reads as Engine B's creed (two subjects, agent-notes,

@@ -5,3 +5,7 @@
 
 # transcript-extractor regenerable output (personal; never commit)
 transcript-extractor/parsed/
+
+# Engine A records are per-project runtime content — the dir ships, its records do not.
+agent-records/*
+!agent-records/.gitkeep
