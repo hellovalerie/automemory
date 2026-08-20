@@ -71,3 +71,20 @@ Modules (in `automemory/`):
 
 Deferred purge tail (unchanged): Gate 5 (GitHub Support blob-purge — user's call, anytime);
 destroy this session's transcript (true end of operation); re-enable capture (Gate 6, after MVP).
+
+## MVP COMPLETE (2026-08-20)
+
+All six modules built + verified against real behavior; installable + runnable end-to-end.
+
+- ① record.py · ② transcript.py · ③ redact.py · ④ dispatch.py · ⑤ reconcile.py · ⑥ cli.py
+- pyproject.toml → `pip/brew install` gives the `automemory` console command.
+- Verified installed flow: `automemory init` (merge-not-clobber hook + scaffold), `status`,
+  `peep`, `reconcile` (SessionStart handover-in + bounded backfill).
+
+Finishing TODOs (post-MVP, not blocking):
+- Packaging: ship engine prompts as package_data (non-editable installs); brew formula.
+- Full CLI (§9): partition/parse/purge/protect/package/port/process/peer.
+- Deferred purge tail: Gate 5 (GitHub Support blob-purge, user's call); destroy this
+  session's transcript (true end); re-enable capture (install + un-disable hooks = dogfood).
+- Doc debt: FOR-THE-NEXT-CLAUDE Engine-A creed; heavy-doc recalibration anchors.
+- Engine B (blind scribe / automemory-capture) reassembly.

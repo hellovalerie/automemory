@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "automemory"
+version = "0.0.1"
+description = "A passive capture engine for AI conversations — record engine + pluggable capture strategies."
+requires-python = ">=3.9"
+dependencies = []  # standard library only, by design (BUILD-SPEC §0)
+
+[project.scripts]
+automemory = "automemory.cli:main"
+
+[tool.setuptools]
+packages = ["automemory"]
+
+# TODO (packaging, pre-brew): ship the engine prompts as package data so a
+# non-editable install resolves system/engine/prompts/record-author.md.
+# Editable (dev) installs already resolve it from the source tree; reconcile
+# falls back to an embedded default prompt if the file isn't found.
