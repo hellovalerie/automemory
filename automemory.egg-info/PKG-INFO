@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: automemory
+Version: 0.0.1
+Summary: A passive capture engine for AI conversations — record engine + pluggable capture strategies.
+Requires-Python: >=3.9

@@ -1,0 +1,15 @@
+README.md
+pyproject.toml
+automemory/__init__.py
+automemory/__main__.py
+automemory/cli.py
+automemory/dispatch.py
+automemory/reconcile.py
+automemory/record.py
+automemory/redact.py
+automemory/transcript.py
+automemory.egg-info/PKG-INFO
+automemory.egg-info/SOURCES.txt
+automemory.egg-info/dependency_links.txt
+automemory.egg-info/entry_points.txt
+automemory.egg-info/top_level.txt

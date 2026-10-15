@@ -70,17 +70,27 @@ _OC_BLIND_CONFIG = {
     }
 }
 
-# PRIMARY self-capture guard. Claude Code isolated the scribe by GEOGRAPHY: run in
-# a tempdir and its JSONL landed under a tempdir project slug, invisible to the
-# reconciler scanning the real project. opencode removed that lever — a headless
-# `opencode run` records its session against the RUNNING SERVER's project, so a
-# tempdir cwd does nothing (verified: cwd=tempdir still recorded the real project
-# directory, 2026-10-15).
+# PRIMARY self-capture guard. Claude Code isolated the blind scribe by GEOGRAPHY —
+# run in a tempdir and its JSONL landed under a tempdir project slug, invisible to
+# the reconciler scanning the real project.
 #
-# OPENCODE_DB restores geography one level up: point the scribe at a throwaway
-# store so its sessions never enter the real one at all. Verified — main store
-# session count delta 0 across a dispatch. The temp DB is deleted afterwards.
-# SCRIBE_SENTINEL below is retained as defence-in-depth.
+# opencode has no equivalent lever at the cwd level. A headless `opencode run`
+# ATTACHES TO A RUNNING opencode SERVER and inherits that server's project — the
+# launch cwd does not decide it. Measured 2026-10-15, opencode 1.19.0:
+#
+#   launch cwd = automemory-logs (no server running for it)  -> recorded correctly
+#   launch cwd = /tmp/xyz      (server running for automemory) -> recorded automemory
+#   launch cwd = /tmp/xyz + git init                          -> recorded automemory
+#   launch cwd = automemory-logs (server running)             -> recorded automemory
+#
+# So the hazard is real but the trigger is server attachment, not cwd. Corollary
+# worth knowing: a headless run can execute against a DIFFERENT project than the one
+# it was launched in. Harmless here only because the scribe has every tool denied.
+#
+# OPENCODE_DB sidesteps the whole question by pointing the scribe at a throwaway
+# store, so its sessions never enter the real one at all. Verified: main-store
+# session count delta 0 across repeated real dispatches. Preferred over trying to
+# out-guess server attachment. SCRIBE_SENTINEL below is kept as defence-in-depth.
 
 _FRAMING = (
     "The following is a COMPLETED past work-session transcript. Summarize what "
