@@ -19,6 +19,10 @@ links. If you find yourself adding substance here instead of linking it, stop.
 - Signatures name the model with version (`Fable 5`, `Opus 4.8`) — evidence-gated,
   never fabricated.
 - Scope is Claude Code + claude.ai only (v1). Do not design for Slack/cron/repo-less.
+- **Adapters:** transcript sources live in `automemory/transcript.py` and the provider
+  dispatchers in `automemory/dispatch.py`; `reconcile.resolve_source()` picks between
+  them. Claude Code (JSONL) and opencode (SQLite) are both wired. `AUTOMEMORY_PROVIDER`
+  overrides the auto-detect. Add a provider there — not in `reconcile.py`.
 - Drift policy (SCHEMA.md, "Drift prevention"): one source of truth per fact; routers
   hold no content; supersede by annotation; decisions land in the repo same-session.
 - Before committing vault changes: `bash system/scripts/vault-lint.sh`.

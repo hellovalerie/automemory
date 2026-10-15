@@ -4,7 +4,7 @@ automemory is a human-curated, append-only episodic memory store built *for the 
 
 There's no vector store, no embeddings, no RAG pipeline. Each conversation is processed once, at write time, by an extraction agent that reads the raw transcript and distills it into durable, git-tracked markdown. A hand-tuned taxonomy of five signal types — corrections that carry a standard, self-authored reframes, feeling-anchored moments, deliberately unresolved questions, and practitioner learnings — decides what survives compaction and context loss. Every artifact carries source provenance and an edits ledger, supersession is annotate-never-delete, and every extraction prompt declares its own known biases inline (an explicit counter to sycophancy in what gets flagged as "worth keeping").
 
-v1 ships thin adapters for Claude Code and claude.ai; the underlying criteria, schema, and philosophy are provider-neutral by design.
+v1 ships thin adapters for Claude Code, opencode, and claude.ai; the underlying criteria, schema, and philosophy are provider-neutral by design.
 
 ---
 
@@ -38,4 +38,4 @@ The short pitch: it's memory you can audit, built for your benefit instead of th
 
 **Consistency/identity handling:** Supersession is append-and-annotate, never overwrite or delete, analogous to event-sourcing rather than mutable state. Model signatures are versioned (`Opus 4.8`, not `Opus`) since the corpus spans many model instances with no continuity between them; the system explicitly compensates for the fact that each session starts with a blank context window and zero persistent state.
 
-**Scope:** v1 adapters are Claude Code (git hook) and claude.ai (custom-instruction injection) only; the criteria/schema/philosophy layer is designed to be provider-neutral so other model stacks could plug in via a thin adapter.
+**Scope:** v1 adapters are Claude Code (git hook), opencode (SQLite store), and claude.ai (custom-instruction injection) only; the criteria/schema/philosophy layer is designed to be provider-neutral so other model stacks could plug in via a thin adapter.

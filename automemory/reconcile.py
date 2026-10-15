@@ -7,12 +7,13 @@ Runs from the SessionStart hook (hook payload on stdin). Three jobs:
   3. Backfill the newest N (default 5): transcript -> redact -> author (dispatch)
      -> validate (retry once) -> write record -> rebuild INDEX. Defer the rest.
 
-Records live per-project at <cwd>/agent-records/. Transcripts are read from Claude
-Code's store ~/.claude/projects/<slug>/. A hook is non-interactive, so backfill is
-bounded (cap) and the rest is deferred to `automemory process` (a terminal).
+Records live per-project at <cwd>/agent-records/. Transcripts come from a
+PROVIDER ADAPTER (see `_Source` below): Claude Code's JSONL store, or opencode's
+SQLite store. A hook is non-interactive, so backfill is bounded (cap) and the
+rest is deferred to `automemory process` (a terminal).
 
-Core functions take their dirs and a dispatch_fn injected, so they are testable
-without real model calls; main() wires the real paths + real dispatch.
+Core functions take their source, dirs and a dispatch_fn injected, so they are
+testable without real model calls; main() wires the real paths + real dispatch.
 """
 from __future__ import annotations
 
@@ -20,12 +21,14 @@ import json
 import os
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import dispatch, record, redact, transcript
 
 DEFAULT_CAP = 5
 DEFAULT_MODEL = "haiku"  # the cheap backfill scribe (record.model = the session's model)
+PROVIDER_ENV = "AUTOMEMORY_PROVIDER"
 _ENGINE_ROOT = Path(__file__).resolve().parents[1]
 _PROMPT_PATH = _ENGINE_ROOT / "system" / "engine" / "prompts" / "record-author.md"
 
@@ -106,71 +109,175 @@ def _transcript_meta(path: Path) -> dict:
     return {"occurred": occurred, "title": title[:120], "model": model}
 
 
+# --- provider adapters ---------------------------------------------------------
+# The reconciler's only provider-specific surface. Everything above this line
+# deals in opaque session refs; everything below knows where a provider keeps
+# its transcripts and what shape they are.
+
+
+@dataclass
+class _Source:
+    """A provider's transcript store. Three ops, all best-effort, never raising."""
+
+    name: str
+
+    def list_ids(self, cwd: str) -> list:  # pragma: no cover - interface
+        """Session ids for a project directory, newest-first."""
+        raise NotImplementedError
+
+    def render(self, ref: str, cwd: str = None) -> str:  # pragma: no cover
+        """Session transcript -> the shared readable-text vocabulary."""
+        raise NotImplementedError
+
+    def meta(self, ref: str, cwd: str = None) -> dict:  # pragma: no cover
+        """{occurred, title, model} best-effort."""
+        raise NotImplementedError
+
+    def is_scribe(self, ref: str) -> bool:  # pragma: no cover
+        """True if this session is the engine's own dispatch output (skip it)."""
+        return False
+
+
+class _ClaudeCodeSource(_Source):
+    """Claude Code: one JSONL file per session under ~/.claude/projects/<slug>/.
+
+    The project slug is derived from the session's cwd, so render/meta need it
+    (opencode session ids are global and ignore it)."""
+
+    name = "claude-code"
+
+    def __init__(self, projects_root=None):
+        self.projects_root = Path(
+            projects_root or (Path.home() / ".claude" / "projects")
+        )
+
+    def _path(self, ref: str, cwd: str = None) -> Path:
+        return self.projects_root / _slug_for_cwd(cwd or "") / f"{ref}.jsonl"
+
+    def list_ids(self, cwd: str) -> list:
+        d = self.projects_root / _slug_for_cwd(cwd)
+        if not d.is_dir():
+            return []
+        ids = [p.stem for p in d.glob("*.jsonl")]
+        # Newest-first by file mtime, matching the reconciler's ordering.
+        return sorted(ids, key=lambda s: (self._path(s, cwd)).stat().st_mtime,
+                      reverse=True)
+
+    def render(self, ref: str, cwd: str = None) -> str:
+        return transcript.render_file(self._path(ref, cwd))
+
+    def meta(self, ref: str, cwd: str = None) -> dict:
+        return _transcript_meta(self._path(ref, cwd))
+
+
+class _OpencodeSource(_Source):
+    """opencode: one SQLite store at ~/.local/share/opencode/opencode.db, rows
+    keyed by session id, scoped by the session's recorded directory."""
+
+    name = "opencode"
+
+    def __init__(self, db=None):
+        self.db = db
+
+    def list_ids(self, cwd: str) -> list:
+        return transcript.opencode_session_ids(cwd, db=self.db)
+
+    def render(self, ref: str, cwd: str = None) -> str:
+        return transcript.render_opencode_session(ref, db=self.db)
+
+    def meta(self, ref: str, cwd: str = None) -> dict:
+        return transcript.opencode_session_meta(ref, db=self.db)
+
+    def is_scribe(self, ref: str) -> bool:
+        return transcript.opencode_is_scribe_session(ref, dispatch.SCRIBE_SENTINEL,
+                                                    db=self.db)
+
+
+def resolve_source(cwd: str, provider: str = None, **kw) -> _Source:
+    """Pick a provider adapter. Explicit provider > AUTOMEMORY_PROVIDER >
+    auto-detect (whichever store actually has sessions for this cwd)."""
+    p = provider or os.environ.get(PROVIDER_ENV) or ""
+    p = p.strip().lower()
+    if p in ("claude-code", "claude_code", "claude"):
+        return _ClaudeCodeSource(projects_root=kw.get("claude_projects_root"))
+    if p in ("opencode", "open-code"):
+        return _OpencodeSource(db=kw.get("opencode_db"))
+
+    oc = _OpencodeSource(db=kw.get("opencode_db"))
+    if oc.list_ids(cwd):
+        return oc
+    cc = _ClaudeCodeSource(projects_root=kw.get("claude_projects_root"))
+    return cc if cc.list_ids(cwd) else oc
+
+
 # --- core (testable) ----------------------------------------------------------
 
 
-def find_missing(transcripts_dir: Path, records_dir: Path, current_session: str):
-    """Transcripts with no record yet (excluding the live session), newest-first."""
+def find_missing(source: _Source, records_dir: Path, cwd: str, current_session: str):
+    """Session refs with a transcript but no record yet (excluding the live
+    session and the engine's own scribe sessions), newest-first. Idempotency
+    key is the session ref."""
     out = []
-    if not Path(transcripts_dir).is_dir():
-        return out
-    for p in Path(transcripts_dir).glob("*.jsonl"):
-        if p.stem == current_session:
+    for ref in source.list_ids(cwd):
+        if ref == current_session:
             continue
-        if record.record_exists_for_session(records_dir, p.stem):
+        if source.is_scribe(ref):
             continue
-        out.append(p)
-    out.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        if record.record_exists_for_session(records_dir, ref):
+            continue
+        out.append(ref)
     return out
 
 
-def backfill_one(transcript_path, records_dir, project, prompt, model, dispatch_fn):
+def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
+                 prompt: str, model: str, dispatch_fn, cwd: str = None):
     """Render -> redact -> author (1 retry on malformed) -> write. Returns an
     outcome dict; never raises."""
-    uuid = Path(transcript_path).stem
-    text = transcript.render_file(transcript_path)
+    text = source.render(ref, cwd)
     if not text.strip():
-        return {"uuid": uuid, "status": "empty", "cost": 0.0}
+        return {"uuid": ref, "status": "empty", "cost": 0.0}
     scrubbed, _ = redact.redact(text)
 
     result = None
     for _ in (1, 2):  # author, retry once on malformed
         result = dispatch_fn(scrubbed, prompt, model=model)
         if result.is_error:
-            return {"uuid": uuid, "status": "dispatch-error", "error": result.error,
+            return {"uuid": ref, "status": "dispatch-error", "error": result.error,
                     "cost": result.cost_usd}
         verdict = _valid_or_norecord(result.text)
         if verdict == "norecord":
-            return {"uuid": uuid, "status": "no-record", "cost": result.cost_usd}
+            return {"uuid": ref, "status": "no-record", "cost": result.cost_usd}
         if verdict == "ok":
             break
     if _valid_or_norecord(result.text) != "ok":
-        return {"uuid": uuid, "status": "malformed", "cost": result.cost_usd}
+        return {"uuid": ref, "status": "malformed", "cost": result.cost_usd}
 
-    meta = _transcript_meta(Path(transcript_path))
+    meta = source.meta(ref, cwd)
     secs = _split_sections(result.text)
     path = record.write_record(
         records_dir,
-        provider="claude-code", session_ref=uuid, model=meta["model"],
+        provider=source.name, session_ref=ref, model=meta["model"],
         subject=project, title=meta["title"], occurred=meta["occurred"],
         done=secs.get("Done", ""),
         learnings=secs.get("Learnings & Gotchas", ""),
         outstanding=secs.get("Outstanding", ""),
     )
-    return {"uuid": uuid, "status": "ok", "cost": result.cost_usd, "path": str(path)}
+    return {"uuid": ref, "status": "ok", "cost": result.cost_usd, "path": str(path)}
 
 
-def run(payload: dict, *, claude_projects_root=None, dispatch_fn=None,
-        cap: int = DEFAULT_CAP, out=None) -> dict:
+def run(payload: dict, *, provider: str = None, claude_projects_root=None,
+        opencode_db=None, dispatch_fn=None, cap: int = DEFAULT_CAP, out=None) -> dict:
     """Orchestrate handover-in + bounded backfill. Returns a summary dict."""
     out = out or sys.stdout
     cwd = payload.get("cwd") or os.getcwd()
     current = payload.get("session_id") or ""
     project = Path(cwd).name or "project"
     records_dir = Path(cwd) / "agent-records"
-    projects_root = Path(claude_projects_root or (Path.home() / ".claude" / "projects"))
-    transcripts_dir = projects_root / _slug_for_cwd(cwd)
-    dispatch_fn = dispatch_fn or dispatch.author
+    source = resolve_source(cwd, provider=provider,
+                            claude_projects_root=claude_projects_root,
+                            opencode_db=opencode_db)
+    dispatch_fn = dispatch_fn or dispatch.DISPATCHERS.get(
+        source.name, dispatch.author)
     prompt = _load_prompt()
 
     # 1. handover-in
@@ -182,14 +289,15 @@ def run(payload: dict, *, claude_projects_root=None, dispatch_fn=None,
               "(## Done required, else skip) into agent-records/.\n")
 
     # 2. find missing
-    missing = find_missing(transcripts_dir, records_dir, current)
+    missing = find_missing(source, records_dir, cwd, current)
     todo, deferred = missing[:cap], missing[cap:]
 
     # 3. backfill
     total_cost, wrote = 0.0, 0
     outcomes = []
-    for tp in todo:
-        r = backfill_one(tp, records_dir, project, prompt, DEFAULT_MODEL, dispatch_fn)
+    for ref in todo:
+        r = backfill_one(source, ref, records_dir, project, prompt,
+                         DEFAULT_MODEL, dispatch_fn, cwd)
         outcomes.append(r)
         total_cost += r.get("cost", 0.0)
         if r["status"] == "ok":
@@ -201,8 +309,9 @@ def run(payload: dict, *, claude_projects_root=None, dispatch_fn=None,
         out.write(f"automemory: {len(deferred)} older session(s) pending — "
                   f"run `automemory process` to catch up.\n")
 
-    return {"missing": len(missing), "processed": len(todo), "wrote": wrote,
-            "deferred": len(deferred), "cost": total_cost, "outcomes": outcomes}
+    return {"provider": source.name, "missing": len(missing), "processed": len(todo),
+            "wrote": wrote, "deferred": len(deferred), "cost": total_cost,
+            "outcomes": outcomes}
 
 
 def main() -> int:
