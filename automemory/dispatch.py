@@ -39,21 +39,32 @@ _NO_TOOLS = [
 # OPENCODE_CONFIG_CONTENT. Denying every tool there gives the same blindness:
 # the scribe reads the transcript it was handed and nothing else.
 #
-# CHARACTERISED 2026-10-15 (opencode 1.19.0) — the failure is one key:
-# a TOP-LEVEL {"permission": {"read": "deny"}} reproducibly makes every headless
-# call 403 with "OpenCode's free tier can only be used from within OpenCode".
+# CHARACTERISED 2026-10-15 (opencode 1.19.0) — the failure is ONE key: denying
+# `read` reproducibly makes every headless call 403 with "OpenCode's free tier can
+# only be used from within OpenCode".
 #
-#   top-level read:deny    -> 403 (2/2)      agent-scoped read:deny -> OK
-#   top-level read:allow   -> OK            top-level read:ask     -> OK
-#   top-level {}           -> OK            no config at all        -> OK
+#   permission read:deny                        -> 403 (2/2)
+#   permission edit,glob,grep,list,bash,task,
+#            webfetch,websearch,lsp,skill:deny  -> OK        (everything except read)
+#   permission bash:deny                        -> OK
+#   no permission at all                        -> OK
+#   with and without --agent, with and without --standalone — identical.
 #
-# So it is NOT a billing or tier gate despite the wording — every probe above ran
-# on the same free tier and four of six succeeded. Paying would not change it. It
-# looks like an opencode bug: denying top-level read surfaces a misleading
-# free-tier error. Agent-scoped permissions are unaffected, so we scope ours.
-# Worth reporting upstream.
+# So it is NOT a billing or tier gate despite the wording: the same account on the
+# same free tier succeeds in the neighbouring cases. `read` is simply the trigger.
+# Filed upstream as anomalyco/opencode#55653.
 #
-# Cost of the workaround: one config key's nesting. Kept agent-scoped deliberately.
+# CONSEQUENCE FOR BLINDNESS: we cannot deny `read` on the free tier, so the scribe
+# keeps read access. It still cannot write (write/edit denied), runs in an empty
+# tempdir, is handed no vault path, and its output goes to a throwaway store — so
+# the practical exposure is that it *could* read something it shouldn't and quote
+# it. That is weaker than the intended guarantee. On a paid or own-key provider
+# this should be expected to hold; re-test there and re-add "read": "deny" if so.
+#
+# I previously recorded this as "agent-scoped permissions are unaffected". That was
+# WRONG — the test that seemed to prove it defined the agent but never selected it
+# with --agent, so the permission was never in effect. Selecting the agent with
+# read:deny 403s like everything else.
 _OC_SCRIBE_AGENT = "automemory-scribe"
 _OC_BLIND_CONFIG = {
     "agent": {
@@ -61,9 +72,12 @@ _OC_BLIND_CONFIG = {
             "description": "Blind transcription scribe: summarizes a supplied "
                            "transcript. Reads only the text it is given.",
             "mode": "subagent",
+            # `read` deliberately NOT denied — see the note above: on the free
+            # tier, denying it 403s every call. Everything else is off, so the
+            # scribe still cannot write, execute, or reach the vault's writes.
             "permission": {
-                "read": "deny", "edit": "deny", "glob": "deny", "grep": "deny",
-                "list": "deny", "bash": "deny", "task": "deny", "webfetch": "deny",
+                "edit": "deny", "glob": "deny", "grep": "deny", "list": "deny",
+                "bash": "deny", "task": "deny", "webfetch": "deny",
                 "websearch": "deny", "lsp": "deny", "skill": "deny",
             },
         }
@@ -254,13 +268,29 @@ def author_opencode(
         f"--- BEGIN TRANSCRIPT ---\n{_fit(transcript_text)}\n--- END TRANSCRIPT ---"
     )
     cmd = [cli, "run", prompt, "--model", model, "--format", "json",
-           "--agent", _OC_SCRIBE_AGENT]
+           "--agent", _OC_SCRIBE_AGENT,
+           # --standalone: run a PRIVATE server for this call. Without it,
+           # `opencode run` attaches to whatever background server happens to be
+           # up, and two things break:
+           #   1. OPENCODE_CONFIG_CONTENT (which defines the scribe agent) applies
+           #      to the CLIENT, not to an already-running server — so the call
+           #      fails "Agent not found: automemory-scribe".
+           #   2. It inherits that server's project, which is how scribe sessions
+           #      ended up attributed to whatever repo the user was working in.
+           # A private server is also what makes the blindness config reliable.
+           "--standalone"]
 
     with tempfile.TemporaryDirectory() as neutral:
         # Throwaway store so the scribe's own session cannot enter the real one.
         env = dict(os.environ)
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(_OC_BLIND_CONFIG)
         env["OPENCODE_DB"] = str(Path(neutral) / "scribe.db")
+        # The scribe's opencode is a separate process and loads the same global
+        # plugins. Without this it would fire session.idle on its own output and
+        # the plugin would dispatch another scribe — forever. The opencode
+        # trigger adapter (see ~/.config/opencode/plugin/automemory.ts) checks
+        # this and returns immediately.
+        env["AUTOMEMORY_SCRIBE"] = "1"
         try:
             proc = subprocess.run(
                 cmd, capture_output=True, text=True, cwd=neutral,
@@ -280,3 +310,17 @@ def author_opencode(
 
 # Dispatch table: reconcile picks by provider name.
 DISPATCHERS = {"claude-code": author, "opencode": author_opencode}
+
+# The cheap backfill scribe model, per provider. These are different NAMESPACES —
+# `haiku` is a Claude Code alias and opencode rejects it outright ("Invalid model
+# reference: haiku"). reconcile used to hardcode DEFAULT_MODEL="haiku" and pass it
+# explicitly, which overrode each dispatcher's own default and broke every opencode
+# backfill. Look the model up by provider instead.
+DEFAULT_MODELS = {
+    "claude-code": "haiku",
+    "opencode": "opencode/space-bunny-free",
+}
+
+
+def default_model(provider: str, fallback: str = "haiku") -> str:
+    return DEFAULT_MODELS.get(provider, fallback)

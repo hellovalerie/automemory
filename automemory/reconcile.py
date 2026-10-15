@@ -21,6 +21,7 @@ import json
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -239,8 +240,23 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
     scrubbed, _ = redact.redact(text)
 
     result = None
+    # Two distinct retries, because two distinct failures:
+    #  - malformed output from the scribe (weak-model stochasticity)
+    #  - a DISPATCH error, which is often transient. Observed 2026-10-15: the
+    #    opencode free tier 403s intermittently under repeated calls — the same
+    #    payload succeeded on one run and failed the next four. A provider that
+    #    drops the occasional request shouldn't cost the session its record.
+    # "not found" and malformed-binary errors are permanent; don't hammer those.
+    _PERMANENT = ("not found", "no such file")
+    dispatch_tries, max_dispatch_tries = 0, 3
     for _ in (1, 2):  # author, retry once on malformed
         result = dispatch_fn(scrubbed, prompt, model=model)
+        while result.is_error and dispatch_tries < max_dispatch_tries:
+            if any(p in result.error.lower() for p in _PERMANENT):
+                break
+            dispatch_tries += 1
+            time.sleep(min(2 ** dispatch_tries, 8))
+            result = dispatch_fn(scrubbed, prompt, model=model)
         if result.is_error:
             return {"uuid": ref, "status": "dispatch-error", "error": result.error,
                     "cost": result.cost_usd}
@@ -297,7 +313,7 @@ def run(payload: dict, *, provider: str = None, claude_projects_root=None,
     outcomes = []
     for ref in todo:
         r = backfill_one(source, ref, records_dir, project, prompt,
-                         DEFAULT_MODEL, dispatch_fn, cwd)
+                         dispatch.default_model(source.name), dispatch_fn, cwd)
         outcomes.append(r)
         total_cost += r.get("cost", 0.0)
         if r["status"] == "ok":

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -134,16 +135,78 @@ def cmd_reconcile(_args) -> int:
     return reconcile.main()
 
 
+# --- consent (opencode adapter) -----------------------------------------------
+# The opencode trigger plugin is installed globally and is DEFAULT OFF per
+# project. Consent lives in one global config file keyed by directory, so turning
+# recording on leaves no trace inside the project — no marker file, nothing to
+# gitignore, nothing to accidentally commit.
+
+
+def _consent_path() -> Path:
+    return Path(os.environ.get("AUTOMEMORY_CONFIG")
+                or (Path.home() / ".config" / "opencode" / "automemory.json"))
+
+
+def _consent_load() -> dict:
+    try:
+        return json.loads(_consent_path().read_text(encoding="utf-8")).get("projects", {})
+    except (OSError, ValueError):
+        return {}
+
+
+def _consent_save(projects: dict) -> None:
+    p = _consent_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"projects": projects}, indent=2) + "\n", encoding="utf-8")
+
+
+def cmd_enable(args) -> int:
+    proj = str(Path(args.path).resolve() if args.path else Path.cwd())
+    projects = _consent_load()
+    projects[proj] = "on"
+    _consent_save(projects)
+    print(f"automemory: recording enabled for {proj}")
+    print("  (open an opencode session there to trigger the first reconcile)")
+    return 0
+
+
+def cmd_disable(args) -> int:
+    proj = str(Path(args.path).resolve() if args.path else Path.cwd())
+    projects = _consent_load()
+    if projects.pop(proj, None) is None:
+        print(f"automemory: not enabled for {proj} (no change)")
+    else:
+        _consent_save(projects)
+        print(f"automemory: recording disabled for {proj}")
+    return 0
+
+
+def cmd_projects(_args) -> int:
+    projects = _consent_load()
+    if not projects:
+        print("automemory: no projects configured (enable with: automemory enable)")
+        return 0
+    for proj, state in sorted(projects.items()):
+        print(f"  {state:6} {proj}")
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="automemory", description="passive capture engine for AI conversations")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("init", help="wire the SessionStart hook + scaffold agent-records/")
     sub.add_parser("status", help="record count, latest, hook state")
     sub.add_parser("peep", help="print the record index (titles)")
+    p_en = sub.add_parser("enable", help="record sessions for this project (opencode adapter)")
+    p_en.add_argument("path", nargs="?", help="project dir (default: cwd)")
+    p_di = sub.add_parser("disable", help="stop recording a project")
+    p_di.add_argument("path", nargs="?", help="project dir (default: cwd)")
+    sub.add_parser("projects", help="list projects and their recording state")
     sub.add_parser("reconcile", help=argparse.SUPPRESS)  # internal hook entrypoint
     args = p.parse_args(argv)
     return {
         "init": cmd_init, "status": cmd_status, "peep": cmd_peep, "reconcile": cmd_reconcile,
+        "enable": cmd_enable, "disable": cmd_disable, "projects": cmd_projects,
     }[args.cmd](args)
 
 
