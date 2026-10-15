@@ -25,10 +25,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import dispatch, record, redact, transcript
+from . import dispatch, providers, record, redact, transcript
 
 DEFAULT_CAP = 5
-DEFAULT_MODEL = "haiku"  # the cheap backfill scribe (record.model = the session's model)
+# The scribe model is NOT a constant — see providers.py. `DEFAULT_MODEL = "haiku"`
+# used to live here and broke every opencode backfill (its model namespace rejects
+# "haiku"). Callers must go through dispatch.default_model(provider).
 PROVIDER_ENV = "AUTOMEMORY_PROVIDER"
 _ENGINE_ROOT = Path(__file__).resolve().parents[1]
 _PROMPT_PATH = _ENGINE_ROOT / "system" / "engine" / "prompts" / "record-author.md"
@@ -170,6 +172,18 @@ class _ClaudeCodeSource(_Source):
     def meta(self, ref: str, cwd: str = None) -> dict:
         return _transcript_meta(self._path(ref, cwd))
 
+    def is_scribe(self, ref: str, cwd: str = None) -> bool:
+        """Claude Code's neutral-cwd isolation usually keeps the scribe's own
+        transcripts out of the scanned project entirely, so this is belt-and-
+        braces — but the guard is cheap and the failure it prevents (the engine
+        silently authoring records about itself) is expensive."""
+        p = self._path(ref, cwd)
+        try:
+            with p.open(encoding="utf-8", errors="replace") as fh:
+                return dispatch.SCRIBE_SENTINEL in fh.read(200_000)
+        except OSError:
+            return False
+
 
 class _OpencodeSource(_Source):
     """opencode: one SQLite store at ~/.local/share/opencode/opencode.db, rows
@@ -197,12 +211,16 @@ class _OpencodeSource(_Source):
 def resolve_source(cwd: str, provider: str = None, **kw) -> _Source:
     """Pick a provider adapter. Explicit provider > AUTOMEMORY_PROVIDER >
     auto-detect (whichever store actually has sessions for this cwd)."""
-    p = provider or os.environ.get(PROVIDER_ENV) or ""
-    p = p.strip().lower()
-    if p in ("claude-code", "claude_code", "claude"):
-        return _ClaudeCodeSource(projects_root=kw.get("claude_projects_root"))
-    if p in ("opencode", "open-code"):
-        return _OpencodeSource(db=kw.get("opencode_db"))
+    requested = provider or os.environ.get(PROVIDER_ENV) or ""
+    if requested:
+        # Only short-circuit when the caller actually named one. Falling through
+        # providers.resolve("") here would return DEFAULT and make auto-detect
+        # unreachable — which is exactly the bug this guard prevents.
+        p = providers.resolve(requested)
+        if p.name == "claude-code":
+            return _ClaudeCodeSource(projects_root=kw.get("claude_projects_root"))
+        if p.name == "opencode":
+            return _OpencodeSource(db=kw.get("opencode_db"))
 
     oc = _OpencodeSource(db=kw.get("opencode_db"))
     if oc.list_ids(cwd):
@@ -222,7 +240,7 @@ def find_missing(source: _Source, records_dir: Path, cwd: str, current_session: 
     for ref in source.list_ids(cwd):
         if ref == current_session:
             continue
-        if source.is_scribe(ref):
+        if source.is_scribe(ref, cwd):
             continue
         if record.record_exists_for_session(records_dir, ref):
             continue
@@ -281,6 +299,27 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
     return {"uuid": ref, "status": "ok", "cost": result.cost_usd, "path": str(path)}
 
 
+def records_dir_for(cwd: str) -> Path:
+    """Where this project's records live.
+
+    Default is <project>/agent-records/. A project may redirect them elsewhere
+    (consent entry `records_dir`) — used when a project's history should be
+    durable in a private repo rather than gitignored out of a public one. Same
+    lookup as the plugin's consent gate, so the two can't disagree.
+    """
+    default = Path(cwd) / "agent-records"
+    try:
+        cfg = Path(os.environ.get("AUTOMEMORY_CONFIG")
+                   or (Path.home() / ".config" / "opencode" / "automemory.json"))
+        entry = json.loads(cfg.read_text(encoding="utf-8")).get("projects", {}) \
+            .get(str(Path(cwd).resolve()), {})
+        if isinstance(entry, dict) and entry.get("records_dir"):
+            return Path(entry["records_dir"]) / "agent-records"
+    except (OSError, ValueError, KeyError):
+        pass
+    return default
+
+
 def run(payload: dict, *, provider: str = None, claude_projects_root=None,
         opencode_db=None, dispatch_fn=None, cap: int = DEFAULT_CAP, out=None) -> dict:
     """Orchestrate handover-in + bounded backfill. Returns a summary dict."""
@@ -288,7 +327,7 @@ def run(payload: dict, *, provider: str = None, claude_projects_root=None,
     cwd = payload.get("cwd") or os.getcwd()
     current = payload.get("session_id") or ""
     project = Path(cwd).name or "project"
-    records_dir = Path(cwd) / "agent-records"
+    records_dir = records_dir_for(cwd)
     source = resolve_source(cwd, provider=provider,
                             claude_projects_root=claude_projects_root,
                             opencode_db=opencode_db)

@@ -29,6 +29,8 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import providers
+
 # Built-in tools we explicitly deny (variadic flag must be kept LAST in argv).
 _NO_TOOLS = [
     "Bash", "Edit", "MultiEdit", "Write", "Read", "NotebookEdit",
@@ -308,19 +310,10 @@ def author_opencode(
     return _parse_oc_stream(proc.stdout, model)
 
 
-# Dispatch table: reconcile picks by provider name.
+# Dispatch table: reconcile picks by provider name. The model each one uses comes
+# from providers.py so there is exactly one place provider config is declared.
 DISPATCHERS = {"claude-code": author, "opencode": author_opencode}
 
-# The cheap backfill scribe model, per provider. These are different NAMESPACES —
-# `haiku` is a Claude Code alias and opencode rejects it outright ("Invalid model
-# reference: haiku"). reconcile used to hardcode DEFAULT_MODEL="haiku" and pass it
-# explicitly, which overrode each dispatcher's own default and broke every opencode
-# backfill. Look the model up by provider instead.
-DEFAULT_MODELS = {
-    "claude-code": "haiku",
-    "opencode": "opencode/space-bunny-free",
-}
 
-
-def default_model(provider: str, fallback: str = "haiku") -> str:
-    return DEFAULT_MODELS.get(provider, fallback)
+def default_model(provider: str, fallback: str = None) -> str:
+    return providers.scribe_model(provider, fallback)

@@ -1,11 +1,18 @@
 """cli.py — the automemory command surface (MVP subset of BUILD-SPEC §9).
 
 Commands:
-  init       wire the SessionStart hook into <cwd>/.claude/settings.json
-             (merge-not-clobber) + scaffold agent-records/.
-  status     health: record count, latest, whether the hook is wired.
+  init       provider-aware setup: scaffold agent-records/ and wire whichever
+             trigger this harness actually has (see providers.py).
+  status     health: record count, latest, trigger state.
   peep       print the index (titles) — the map.
-  reconcile  internal: the SessionStart hook entrypoint (reads payload on stdin).
+  enable     grant recording consent for a project (opencode adapter)
+  disable    revoke it
+  projects   list projects and their recording state
+  reconcile  internal: the trigger entrypoint (reads payload on stdin)
+
+Provider-aware init matters: Claude Code has a hook file to write, opencode has
+no hook at all (consent + a global plugin). Wiring .claude/settings.json inside
+an opencode project used to "succeed" while doing nothing useful.
 
 Stdlib only. Core functions take an explicit project path so they're testable
 without chdir; the arg handlers pass Path.cwd().
@@ -18,7 +25,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import reconcile
+from . import providers, record, reconcile
 
 # The shipped console entrypoint (brew/pip installs `automemory` on PATH).
 HOOK_COMMAND = "automemory reconcile"
@@ -79,9 +86,13 @@ def scaffold_records(project: Path) -> Path:
     return d
 
 
-def status_of(project: Path) -> dict:
-    recs = project / "agent-records"
-    md = [p for p in recs.glob("*.md") if p.name != "INDEX.md"] if recs.is_dir() else []
+def status_of(project: Path, records_dir: Path = None) -> dict:
+    recs = Path(records_dir) if records_dir else project / "agent-records"
+    # Count only real records — anything with a record envelope. A README.md
+    # sitting in agent-records/ is documentation, not a session record.
+    md = [p for p in recs.glob("*.md")
+          if p.name != "INDEX.md" and record._fm_parse(p.read_text(encoding="utf-8")).get("id")] \
+        if recs.is_dir() else []
     latest = max(md, key=lambda p: p.stat().st_mtime).name if md else None
     return {
         "project": project.name,
@@ -91,42 +102,87 @@ def status_of(project: Path) -> dict:
     }
 
 
-def index_text(project: Path) -> str:
-    idx = project / "agent-records" / "INDEX.md"
+def index_text(project: Path, records_dir: Path = None) -> str:
+    base = Path(records_dir) if records_dir else project / "agent-records"
+    idx = base / "INDEX.md"
     return idx.read_text(encoding="utf-8").rstrip() if idx.exists() else ""
 
 
 # --- arg handlers -------------------------------------------------------------
 
 
+def _detect_provider(cwd: Path) -> str:
+    """Which harness is this project driven by?
+
+    AUTOMEMORY_PROVIDER wins. Otherwise ask the reconciler, which auto-detects
+    by whichever store actually holds sessions for this directory.
+    """
+    explicit = os.environ.get("AUTOMEMORY_PROVIDER")
+    if explicit:
+        return providers.resolve(explicit).name
+    try:
+        return reconcile.resolve_source(str(cwd)).name
+    except Exception:
+        return providers.DEFAULT.name
+
+
 def cmd_init(_args) -> int:
     project = Path.cwd()
-    try:
-        result = wire_hook(project, hook_command_for(project))
-    except ValueError as e:
-        print(f"automemory init: ERROR — {e}", file=sys.stderr)
-        return 1
-    if result == "already-wired":
-        print("automemory: SessionStart hook already wired (no change).")
-    else:
-        print(f"automemory: wired SessionStart hook -> {HOOK_COMMAND}")
+    prov = providers.resolve(_detect_provider(project))
     d = scaffold_records(project)
     print(f"automemory: records dir ready at {d}")
+
+    if prov.wiring == "settings-file":
+        try:
+            result = wire_hook(project, hook_command_for(project))
+        except ValueError as e:
+            print(f"automemory init: ERROR — {e}", file=sys.stderr)
+            return 1
+        if result == "already-wired":
+            print("automemory: SessionStart hook already wired (no change).")
+        else:
+            print(f"automemory: wired SessionStart hook -> {HOOK_COMMAND}")
+    else:
+        # opencode has no hook file. Wiring a .claude/settings.json here would
+        # report success and do nothing — the trigger is the global plugin, and
+        # this project needs a consent entry.
+        state = _consent_state(_consent_load().get(str(project.resolve())))
+        print(f"automemory: provider {prov.name} — trigger is the global plugin, "
+              f"not a hook file.")
+        if state == "on":
+            print(f"automemory: recording already enabled for {project}")
+        else:
+            print(f"automemory: run `automemory enable` in {project} to record it")
     return 0
 
 
 def cmd_status(_args) -> int:
-    s = status_of(Path.cwd())
+    cwd = Path.cwd()
+    routed = reconcile.records_dir_for(str(cwd))
+    s = status_of(cwd, records_dir=routed)
+    prov = providers.resolve(_detect_provider(cwd))
     print(f"automemory status — {s['project']}")
     print(f"  records: {s['records']}")
     if s["latest"]:
         print(f"  latest:  {s['latest']}")
-    print(f"  hook:    {'wired' if s['wired'] else 'not wired (run: automemory init)'}")
+    if prov.wiring == "settings-file":
+        print(f"  hook:    {'wired' if s['wired'] else 'not wired (run: automemory init)'}")
+    else:
+        entry = _consent_load().get(str(cwd.resolve()))
+        state = _consent_state(entry)
+        mark = {"on": "enabled", "asked": "asked, not enabled",
+                "off": "disabled"}.get(state, "not enabled")
+        print(f"  provider: {prov.name}")
+        print(f"  consent:  {mark} (automemory enable)")
+        routed = reconcile.records_dir_for(str(cwd))
+        if routed != cwd / "agent-records":
+            print(f"  records:  {routed}  (routed)")
     return 0
 
 
 def cmd_peep(_args) -> int:
-    txt = index_text(Path.cwd())
+    cwd = Path.cwd()
+    txt = index_text(cwd, records_dir=reconcile.records_dir_for(str(cwd)))
     print(txt if txt else "automemory: no records yet (empty).")
     return 0
 
@@ -160,12 +216,29 @@ def _consent_save(projects: dict) -> None:
     p.write_text(json.dumps({"projects": projects}, indent=2) + "\n", encoding="utf-8")
 
 
+def _consent_state(entry) -> str:
+    """Consent entries are {"state": "on"|"off"|"asked", "records_dir"?: str};
+    older files stored a bare string. Accept both."""
+    return entry.get("state", "") if isinstance(entry, dict) else (entry or "")
+
+
 def cmd_enable(args) -> int:
     proj = str(Path(args.path).resolve() if args.path else Path.cwd())
     projects = _consent_load()
-    projects[proj] = "on"
+    entry: dict = {"state": "on"}
+    if args.records:
+        # Records live somewhere other than <project>/agent-records/. Used when a
+        # project's record should be durable rather than gitignored — e.g. the
+        # automemory repo's own history belongs in the private automemory-logs,
+        # not thrown away so the public product ships clean.
+        entry["records_dir"] = str(Path(args.records).expanduser().resolve())
+    elif isinstance(projects.get(proj), dict) and projects[proj].get("records_dir"):
+        entry["records_dir"] = projects[proj]["records_dir"]  # preserve on re-enable
+    projects[proj] = entry
     _consent_save(projects)
     print(f"automemory: recording enabled for {proj}")
+    if entry.get("records_dir"):
+        print(f"  records -> {entry['records_dir']}")
     print("  (open an opencode session there to trigger the first reconcile)")
     return 0
 
@@ -186,8 +259,12 @@ def cmd_projects(_args) -> int:
     if not projects:
         print("automemory: no projects configured (enable with: automemory enable)")
         return 0
-    for proj, state in sorted(projects.items()):
-        print(f"  {state:6} {proj}")
+    for proj, entry in sorted(projects.items()):
+        state = entry.get("state") if isinstance(entry, dict) else entry
+        extra = ""
+        if isinstance(entry, dict) and entry.get("records_dir"):
+            extra = f"  -> {entry['records_dir']}"
+        print(f"  {state:6} {proj}{extra}")
     return 0
 
 
@@ -199,6 +276,7 @@ def main(argv=None) -> int:
     sub.add_parser("peep", help="print the record index (titles)")
     p_en = sub.add_parser("enable", help="record sessions for this project (opencode adapter)")
     p_en.add_argument("path", nargs="?", help="project dir (default: cwd)")
+    p_en.add_argument("--records", help="store records elsewhere (e.g. a private repo)")
     p_di = sub.add_parser("disable", help="stop recording a project")
     p_di.add_argument("path", nargs="?", help="project dir (default: cwd)")
     sub.add_parser("projects", help="list projects and their recording state")
