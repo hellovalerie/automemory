@@ -27,6 +27,7 @@ import os
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 
 # Built-in tools we explicitly deny (variadic flag must be kept LAST in argv).
 _NO_TOOLS = [
@@ -59,6 +60,18 @@ _OC_BLIND_CONFIG = {
         }
     }
 }
+
+# PRIMARY self-capture guard. Claude Code isolated the scribe by GEOGRAPHY: run in
+# a tempdir and its JSONL landed under a tempdir project slug, invisible to the
+# reconciler scanning the real project. opencode removed that lever — a headless
+# `opencode run` records its session against the RUNNING SERVER's project, so a
+# tempdir cwd does nothing (verified: cwd=tempdir still recorded the real project
+# directory, 2026-10-15).
+#
+# OPENCODE_DB restores geography one level up: point the scribe at a throwaway
+# store so its sessions never enter the real one at all. Verified — main store
+# session count delta 0 across a dispatch. The temp DB is deleted afterwards.
+# SCRIBE_SENTINEL below is retained as defence-in-depth.
 
 _FRAMING = (
     "The following is a COMPLETED past work-session transcript. Summarize what "
@@ -224,10 +237,11 @@ def author_opencode(
     cmd = [cli, "run", prompt, "--model", model, "--format", "json",
            "--agent", _OC_SCRIBE_AGENT]
 
-    env = dict(os.environ)
-    env["OPENCODE_CONFIG_CONTENT"] = json.dumps(_OC_BLIND_CONFIG)
-
     with tempfile.TemporaryDirectory() as neutral:
+        # Throwaway store so the scribe's own session cannot enter the real one.
+        env = dict(os.environ)
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(_OC_BLIND_CONFIG)
+        env["OPENCODE_DB"] = str(Path(neutral) / "scribe.db")
         try:
             proc = subprocess.run(
                 cmd, capture_output=True, text=True, cwd=neutral,
