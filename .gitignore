@@ -9,3 +9,8 @@ transcript-extractor/parsed/
 # Engine A records are per-project runtime content — the dir ships, its records do not.
 agent-records/*
 !agent-records/.gitkeep
+
+# Build metadata from a local `pip install -e .`. Regenerable; never source.
+# (Committed once by accident in e8610ff — `git add -A` with no rule here.
+# A contributor who installs should not have to think about this.)
+*.egg-info/
