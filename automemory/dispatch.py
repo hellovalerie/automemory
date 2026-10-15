@@ -39,12 +39,21 @@ _NO_TOOLS = [
 # OPENCODE_CONFIG_CONTENT. Denying every tool there gives the same blindness:
 # the scribe reads the transcript it was handed and nothing else.
 #
-# VERIFIED 2026-10-15 (opencode 1.19.0) — the permission block MUST be scoped
-# inside an agent definition. A TOP-LEVEL `{"permission":{…}}` merge made every
-# headless call fail with an HTTP 403 "OpenCode's free tier can only be used
-# from within OpenCode" (3/3 reproducible), while the identical block scoped to
-# `agent.<name>.permission` succeeded (and plain calls succeeded 4/4). Mechanism
-# unknown; the asymmetry is real, so keep the denials agent-scoped.
+# CHARACTERISED 2026-10-15 (opencode 1.19.0) — the failure is one key:
+# a TOP-LEVEL {"permission": {"read": "deny"}} reproducibly makes every headless
+# call 403 with "OpenCode's free tier can only be used from within OpenCode".
+#
+#   top-level read:deny    -> 403 (2/2)      agent-scoped read:deny -> OK
+#   top-level read:allow   -> OK            top-level read:ask     -> OK
+#   top-level {}           -> OK            no config at all        -> OK
+#
+# So it is NOT a billing or tier gate despite the wording — every probe above ran
+# on the same free tier and four of six succeeded. Paying would not change it. It
+# looks like an opencode bug: denying top-level read surfaces a misleading
+# free-tier error. Agent-scoped permissions are unaffected, so we scope ours.
+# Worth reporting upstream.
+#
+# Cost of the workaround: one config key's nesting. Kept agent-scoped deliberately.
 _OC_SCRIBE_AGENT = "automemory-scribe"
 _OC_BLIND_CONFIG = {
     "agent": {
