@@ -24,9 +24,29 @@ def slug(text: str) -> str:
 
 
 def short(session_ref: str) -> str:
-    """Leading token of the session ref, first 8 chars — for a legible filename."""
-    token = re.split(r"[^A-Za-z0-9]", session_ref or "", maxsplit=1)[0]
-    return token[:8] or "unknown"
+    """A short, collision-resistant, filename-safe token for a session ref.
+
+    Prefixed ids (opencode `ses_ec1e5bf2…`) must merge the prefix with the first
+    id segment: taking only the leading alphanumeric run would return the
+    CONSTANT "ses" for every opencode session, and two same-day sessions on one
+    subject would overwrite each other's record. (ENGINE-A.md relies on the
+    session ref guaranteeing filename uniqueness.)
+
+    Bare UUIDs (Claude Code `9f2c1a44-3b7e-…`) keep their historical 8-char
+    prefix — merging is a no-op there because the first segment is already 8+.
+    """
+    ref = (session_ref or "").strip()
+    runs = re.findall(r"[A-Za-z0-9]+", ref)
+    if not runs:
+        return "unknown"
+    if len(runs) == 1:
+        return runs[0][:8]
+    # A SHORT leading run is a scheme prefix (`ses_…`), constant across every
+    # session — it carries no discriminating power and would eat the token
+    # budget, so skip it. A long one is already the id (Claude Code UUIDs).
+    if len(runs[0]) <= 4:
+        return runs[1][:8] or runs[0][:8]
+    return runs[0][:8]
 
 
 def _now_iso() -> str:
