@@ -6,11 +6,23 @@
 # transcript-extractor regenerable output (personal; never commit)
 transcript-extractor/parsed/
 
-# Engine A records are per-project runtime content — the dir ships, its records do not.
-agent-records/*
-!agent-records/.gitkeep
-
 # Build metadata from a local `pip install -e .`. Regenerable; never source.
-# (Committed once by accident in e8610ff — `git add -A` with no rule here.
-# A contributor who installs should not have to think about this.)
+# (Committed once by accident in e8610ff — `git add -A` with no rule here.)
 *.egg-info/
+
+# ── Private working material ─────────────────────────────────────────────────
+# These are NOT public and NOT shipped. They live in the private
+# automemory-logs repo instead, which took custody on 2026-10-15. Removing them
+# from the tip does not unpublish them from git history — see the rewrite note.
+#
+#   system/design/  build notes: texture criteria, steering rubric, schema,
+#                   engine docs. The steering material is the sensitive part.
+#   product/        personal markdown (BUILD-SPEC, GLOSSARY, AGENT-SIDE).
+system/design/
+product/
+
+# NOTE: agent-records/ is deliberately NOT ignored. Records used to be gitignored
+# here on the theory that the product ships clean; in practice that deleted the
+# corpus rather than protecting it. Records for this project are routed to the
+# private automemory-logs repo (automemory enable --records ...). If any land
+# here, they are meant to be versioned.
