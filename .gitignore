@@ -3,26 +3,18 @@
 .capture-transcript.tmp
 .capture-extractor.tmp
 
-# transcript-extractor regenerable output (personal; never commit)
+# Regenerable local output — genuinely never wanted in either repo.
 transcript-extractor/parsed/
-
-# Build metadata from a local `pip install -e .`. Regenerable; never source.
-# (Committed once by accident in e8610ff — `git add -A` with no rule here.)
 *.egg-info/
 
-# ── Private working material ─────────────────────────────────────────────────
-# These are NOT public and NOT shipped. They live in the private
-# automemory-logs repo instead, which took custody on 2026-10-15. Removing them
-# from the tip does not unpublish them from git history — see the rewrite note.
+# ── NOT ignored ───────────────────────────────────────────────────────────────
+# The design docs, product notes, operating files and session records are all
+# TRACKED, and they all go to the private remote (automemory-logs). They are
+# excluded from the public remote at PUSH time by a filter, not by ignoring.
 #
-#   system/design/  build notes: texture criteria, steering rubric, schema,
-#                   engine docs. The steering material is the sensitive part.
-#   product/        personal markdown (BUILD-SPEC, GLOSSARY, AGENT-SIDE).
-system/design/
-product/
-
-# NOTE: agent-records/ is deliberately NOT ignored. Records used to be gitignored
-# here on the theory that the product ships clean; in practice that deleted the
-# corpus rather than protecting it. Records for this project are routed to the
-# private automemory-logs repo (automemory enable --records ...). If any land
-# here, they are meant to be versioned.
+# Ignoring them here was wrong: .gitignore applies to every remote, so ignoring
+# them would have made them unreachable from the private repo too — "keep it out
+# of public" silently became "delete it".
+#
+# To publish a rinsed tree to the public repo, see `rinse` in CLAUDE.md / the
+# project's release notes: clone to a temp dir, filter, force-push.
