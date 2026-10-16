@@ -140,6 +140,10 @@ class _Source:
         """True if this session is the engine's own dispatch output (skip it)."""
         return False
 
+    def has_content(self, ref: str, cwd: str = None) -> bool:  # pragma: no cover
+        """True if the session has anything a scribe could summarise."""
+        return True
+
 
 class _ClaudeCodeSource(_Source):
     """Claude Code: one JSONL file per session under ~/.claude/projects/<slug>/.
@@ -184,6 +188,13 @@ class _ClaudeCodeSource(_Source):
         except OSError:
             return False
 
+    def has_content(self, ref: str, cwd: str = None) -> bool:
+        p = self._path(ref, cwd)
+        try:
+            return p.stat().st_size > 0
+        except OSError:
+            return False
+
 
 class _OpencodeSource(_Source):
     """opencode: one SQLite store at ~/.local/share/opencode/opencode.db, rows
@@ -208,6 +219,42 @@ class _OpencodeSource(_Source):
         # it to locate the file. opencode session ids are global and ignore it.
         return transcript.opencode_is_scribe_session(ref, dispatch.SCRIBE_SENTINEL,
                                                     db=self.db)
+
+    def has_content(self, ref: str, cwd: str = None) -> bool:
+        """True if the session carries at least one RENDERABLE message.
+
+        Row count is too coarse: a session can hold `system`/`idle` rows and
+        render to nothing at all (measured 2026-10-17 — three such sessions, two
+        rows each, zero characters out). Those still consumed cap slots before
+        this check existed. Deliberately not a render — rendering every session
+        to decide the cap would cost as much as the backfill itself.
+        """
+        try:
+            con = transcript._oc_connect(self.db)
+        except Exception:
+            return True
+        try:
+            if transcript._has_table(con, "session_message"):
+                row = con.execute(
+                    "select count(*) from session_message "
+                    "where session_id = ? and type in ('user','assistant')",
+                    (ref,)).fetchone()
+                if row and row[0]:
+                    return True
+            if transcript._has_table(con, "message"):
+                row = con.execute(
+                    "select count(*) from message where session_id = ? "
+                    "and json_extract(data,'$.role') in ('user','assistant')",
+                    (ref,)).fetchone()
+                return bool(row and row[0])
+            return True
+        except Exception:
+            return True
+        finally:
+            try:
+                con.close()
+            except Exception:
+                pass
 
 
 def resolve_source(cwd: str, provider: str = None, **kw) -> _Source:
@@ -237,12 +284,21 @@ def resolve_source(cwd: str, provider: str = None, **kw) -> _Source:
 def find_missing(source: _Source, records_dir: Path, cwd: str, current_session: str):
     """Session refs with a transcript but no record yet (excluding the live
     session and the engine's own scribe sessions), newest-first. Idempotency
-    key is the session ref."""
+    key is the session ref.
+
+    Empty sessions are dropped HERE, before the cap is applied — not left for
+    backfill_one to reject. Measured 2026-10-17: of 51 missing sessions in this
+    project, the five most-recently-active were all empty or single-line probe
+    runs, so the cap of 5 was spent entirely on sessions that could only ever
+    return "empty" and real work was never reached.
+    """
     out = []
     for ref in source.list_ids(cwd):
         if ref == current_session:
             continue
         if source.is_scribe(ref, cwd):
+            continue
+        if not source.has_content(ref, cwd):
             continue
         if record.record_exists_for_session(records_dir, ref):
             continue

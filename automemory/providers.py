@@ -13,6 +13,29 @@ had to be declared and no way to see what was still Claude-shaped.
 Everything provider-specific now lives here. Adding a provider means adding one
 Provider entry — not hunting for stray defaults.
 
+── When you change anything in one provider's path ────────────────────────────
+Check the OTHER providers too. You do not have to build for them; you have to
+notice whether the thing you just changed left them uncovered, and say so.
+
+This is not hypothetical. While doing opencode work, the Claude Code path was
+left carrying a bug that had been found and fixed on the opencode side — a
+hardcoded model alias (`haiku`) that opencode rejects outright. The reconciler
+worked perfectly on Claude Code and failed silently on opencode, because the
+default lived in a shared file rather than in either provider's own space. It
+surfaced only when someone actually ran the other path.
+
+Concretely, when you touch a dispatch, a transcript reader, or a trigger:
+
+  1. Which providers does this change affect? More than one?
+  2. For each OTHER one: does this leave a case uncovered? A default that only
+     works for the provider you happen to be running?
+  3. If it does — fix it, or write it down as a known gap. Silently narrowing
+     scope to the provider in front of you is how a working path stops being
+     portable without anyone noticing.
+
+The same applies in reverse, and it is not "my provider's problem": a user on
+either side of an adapter deserves to know whether their case is covered.
+
 What is deliberately NOT here
 -----------------------------
 - Transcript parsing/rendering (lives in transcript.py behind the render
