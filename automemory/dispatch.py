@@ -45,28 +45,36 @@ _NO_TOOLS = [
 # `read` reproducibly makes every headless call 403 with "OpenCode's free tier can
 # only be used from within OpenCode".
 #
-#   permission read:deny                        -> 403 (2/2)
-#   permission edit,glob,grep,list,bash,task,
-#            webfetch,websearch,lsp,skill:deny  -> OK        (everything except read)
+#   permission read:deny                        -> 403
+#   permission read:ask                         -> OK   (tool stays in the list)
+#   permission read:allow                       -> OK
 #   permission bash:deny                        -> OK
+#   permission edit,glob,grep,list,bash,task,
+#            webfetch,websearch,lsp,skill:deny  -> OK   (everything except read)
+#   tools {read:false}                          -> 403
 #   no permission at all                        -> OK
-#   with and without --agent, with and without --standalone — identical.
+#   with and without --standalone               -> identical
 #
-# So it is NOT a billing or tier gate despite the wording: the same account on the
-# same free tier succeeds in the neighbouring cases. `read` is simply the trigger.
-# Filed upstream as anomalyco/opencode#55653.
+# MECHANISM (confirmed by maintainers, anomalyco/opencode#50627): the free-tier
+# check is SERVER-SIDE and inspects which tools are listed in the model request.
+# `ask`/`allow` leave `read` in that list; `deny`/`false` removes it, and the
+# server then rejects the request as though it came from outside OpenCode. So it
+# is not a billing decision — paying does not change it.
 #
 # CONSEQUENCE FOR BLINDNESS: we cannot deny `read` on the free tier, so the scribe
-# keeps read access. It still cannot write (write/edit denied), runs in an empty
-# tempdir, is handed no vault path, and its output goes to a throwaway store — so
-# the practical exposure is that it *could* read something it shouldn't and quote
-# it. That is weaker than the intended guarantee. On a paid or own-key provider
-# this should be expected to hold; re-test there and re-add "read": "deny" if so.
+# keeps read access. It still cannot write, runs in an empty tempdir, is handed no
+# vault path, and its output goes to a throwaway store — so the practical exposure
+# is that it *could* read something it shouldn't and quote it. Weaker than
+# intended. On a paid or own-key provider re-test and re-add "read": "deny".
+#
+# AGENT-SCOPING IS NOT A WORKAROUND HERE. It looks like one and isn't: with the
+# agent defined but NOT selected the call succeeds; add `--agent <same agent>` and
+# the identical config 403s (3/3), because selecting the agent makes ITS tool list
+# the one sent. For a headless caller there is no config-only way to deny `read`.
 #
 # I previously recorded this as "agent-scoped permissions are unaffected". That was
-# WRONG — the test that seemed to prove it defined the agent but never selected it
-# with --agent, so the permission was never in effect. Selecting the agent with
-# read:deny 403s like everything else.
+# WRONG — the test that seemed to prove it never passed --agent, so the permission
+# was not in effect. Selecting the agent 403s like everything else.
 _OC_SCRIBE_AGENT = "automemory-scribe"
 _OC_BLIND_CONFIG = {
     "agent": {
