@@ -136,7 +136,7 @@ class _Source:
         """{occurred, title, model} best-effort."""
         raise NotImplementedError
 
-    def is_scribe(self, ref: str) -> bool:  # pragma: no cover
+    def is_scribe(self, ref: str, cwd: str = None) -> bool:  # pragma: no cover
         """True if this session is the engine's own dispatch output (skip it)."""
         return False
 
@@ -203,7 +203,9 @@ class _OpencodeSource(_Source):
     def meta(self, ref: str, cwd: str = None) -> dict:
         return transcript.opencode_session_meta(ref, db=self.db)
 
-    def is_scribe(self, ref: str) -> bool:
+    def is_scribe(self, ref: str, cwd: str = None) -> bool:
+        # cwd is accepted for interface parity with the Claude source, which needs
+        # it to locate the file. opencode session ids are global and ignore it.
         return transcript.opencode_is_scribe_session(ref, dispatch.SCRIBE_SENTINEL,
                                                     db=self.db)
 
