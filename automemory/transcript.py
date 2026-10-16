@@ -166,10 +166,20 @@ def render_file(path) -> str:
 # --- opencode adapter ----------------------------------------------------------
 # opencode keeps transcripts in SQLite, not JSONL. Opened READ-ONLY and never
 # written: opencode owns this file and may have it open (WAL) at the same time.
-# Schema: session(id, directory, title, time_created) -> message(session_id,
-# data{role,modelID,...}) -> part(message_id, data{type:text|tool|...}).
-# A tool call and its result are ONE part (state.input + state.output), so there
-# is no tool_use/tool_result pairing to stitch here.
+#
+# ── TWO SCHEMAS ───────────────────────────────────────────────────────────────
+# v1 (<=1.19): session/message/part. Parts in their own table; tool parts carry
+#     `tool` and `state.output`. Session ids look like `ses_ec…`.
+# v2 (2.x):   session_v2/session_message. NO parts table — content blocks are
+#     inlined into the message (`content: [...]`); tool blocks carry `name` and
+#     `state.content[]`. Session ids use a different prefix (`ses_eb…`).
+#
+# v2 FREEZES the v1 tables rather than dropping them (verified 2026-10-16: the v1
+# tables stop receiving rows at the moment of upgrade — part/message newest row
+# stayed at the upgrade instant while session_message kept growing). An upgraded
+# install therefore has both, with live content only in v2. We read both and
+# render either into the same vocabulary, which is why the renderer was factored
+# to a neutral shape: old sessions stay backfillable across the upgrade.
 
 
 def opencode_db_path(db=None) -> Path:
@@ -184,113 +194,205 @@ def _oc_connect(db=None):
     return sqlite3.connect(f"file:{p}?mode=ro", uri=True)
 
 
+def _has_table(con, name: str) -> bool:
+    return con.execute(
+        "select 1 from sqlite_master where type='table' and name=?", (name,)
+    ).fetchone() is not None
+
+
 def opencode_session_ids(directory, db=None) -> list:
-    """Session ids recorded for a project directory, newest-first. Never raises."""
+    """Session ids for a project directory, newest-first, across BOTH schemas.
+    Never raises; duplicates impossible."""
     try:
         con = _oc_connect(db)
     except sqlite3.Error:
         return []
+    out = []
     try:
-        rows = con.execute(
-            "select id from session where directory = ? order by time_created desc",
-            (str(directory),),
-        ).fetchall()
-        return [r[0] for r in rows]
+        if _has_table(con, "session_v2"):
+            out += [r[0] for r in con.execute(
+                "select id from session_v2 where directory = ? order by time_created desc",
+                (str(directory),))]
+        if _has_table(con, "session"):
+            out += [r[0] for r in con.execute(
+                "select id from session where directory = ? order by time_created desc",
+                (str(directory),))]
     except sqlite3.Error:
-        return []
+        return out
     finally:
         con.close()
+    seen, uniq = set(), []
+    for s in out:
+        if s not in seen:
+            seen.add(s)
+            uniq.append(s)
+    return uniq
 
 
-def _oc_tool_marker(part: dict) -> str:
-    """One condensed marker for an opencode tool part. Mirrors the Claude Code
-    marker table; opencode tool names are lowercase."""
-    st = part.get("state") or {}
+def _oc_output(state: dict) -> str:
+    """Tool output text, tolerating both schemas and both output conventions."""
+    c = state.get("content")
+    if isinstance(c, list):
+        joined = "\n".join(
+            b.get("text", "") for b in c
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+        if joined:
+            return joined
+    out = state.get("output")
+    if isinstance(out, str):
+        return out
+    md = state.get("metadata") or {}
+    return md.get("output") if isinstance(md.get("output"), str) else ""
+
+
+def _oc_path(inp: dict) -> str:
+    """The path argument, tolerating every key v2 actually uses. Observed in one
+    store, in the same schema: `path`, `filePath` and `file_path` all appear for
+    read/edit/write. Assuming one key loses the marker for the others."""
+    for k in ("filePath", "file_path", "path", "notebook_path", "notebookPath"):
+        v = inp.get(k)
+        if v:
+            return str(v)
+    return "?"
+
+
+def _oc_tool_marker(block: dict) -> str:
+    """One condensed marker for an opencode tool block. Mirrors the Claude Code
+    marker table. Handles both schemas: v1 (`tool` + `state.output`) and v2
+    (`name` + `state.content[]`, and `shell` alongside `bash`)."""
+    st = block.get("state") or {}
     inp = st.get("input") or {}
-    name = (part.get("tool") or "").lower()
+    name = (block.get("name") or block.get("tool") or "").lower()
 
     if name == "task":
         desc = inp.get("description") or words(inp.get("prompt", ""), 15)
         return f"[DISPATCH: {clean(desc)}]"
 
-    if name == "bash":
-        cmd = clip(clean(inp.get("command", "")), 80)
-        out = st.get("output")
-        if not isinstance(out, str):
-            out = ((st.get("metadata") or {}).get("output")) or ""
-        line1 = clean(out.split("\n")[0] if out else "")
+    if name in ("bash", "shell"):  # v2 renamed bash -> shell for some tools
+        raw = _oc_output(st)
+        line1 = clean(raw.split("\n")[0] if raw else "")
         if st.get("status") == "error":
             res = "error: " + clip(line1, 80) if line1 else "error"
         else:
             res = line1 or "(no output)"
-        return f"[BASH: {cmd} -> {res}]"
+        return f"[BASH: {clip(clean(inp.get('command','')), 80)} -> {res}]"
 
-    if name in ("edit", "patch"):
-        return f"[EDIT: {clean(inp.get('filePath') or inp.get('file_path') or '?')}]"
-
+    if name in ("edit", "patch", "multiedit"):
+        return f"[EDIT: {clean(_oc_path(inp))}]"
     if name == "write":
-        return f"[WRITE: {clean(inp.get('filePath') or inp.get('file_path') or '?')}]"
-
+        return f"[WRITE: {clean(_oc_path(inp))}]"
     return f"[TOOL {clean(name)}]"
 
 
-def render_opencode_session(session_id, db=None) -> str:
-    """Render one opencode session to the shared text vocabulary. Never raises."""
-    try:
-        con = _oc_connect(db)
-    except sqlite3.Error:
-        return ""
+def _render_v2(con, session_id) -> str:
+    """v2: content blocks are inlined into session_message rows, ordered by seq."""
     out: list = []
-    try:
-        msgs = con.execute(
-            "select id, data from message where session_id = ? order by time_created, id",
-            (session_id,),
-        ).fetchall()
-        for _mid, mdata in msgs:
-            try:
-                md = json.loads(mdata)
-            except json.JSONDecodeError:
-                continue
-            role = md.get("role") or "user"
-            parts = con.execute(
-                "select data from part where message_id = ? order by time_created, id",
-                (_mid,),
-            ).fetchall()
-            for (pdata,) in parts:
-                try:
-                    pd = json.loads(pdata)
-                except json.JSONDecodeError:
+    rows = con.execute(
+        "select type, data from session_message where session_id = ? order by seq",
+        (session_id,),
+    ).fetchall()
+    for mtype, mdata in rows:
+        try:
+            d = json.loads(mdata)
+        except json.JSONDecodeError:
+            continue
+        if mtype == "user":
+            text = (d.get("text") or "").strip()
+            if text:
+                out.append(f"### user\n\n{text}\n\n")
+        elif mtype == "assistant":
+            for b in d.get("content") or []:
+                if not isinstance(b, dict):
                     continue
-                ptype = pd.get("type")
-                if ptype in _OC_SKIP_TYPES:
-                    continue
-                if ptype == "text":
-                    text = (pd.get("text") or "").strip()
+                bt = b.get("type")
+                if bt == "text":
+                    text = (b.get("text") or "").strip()
                     if text:
-                        out.append(f"### {role}\n\n{text}\n\n")
-                elif ptype == "tool":
-                    out.append(clip(_oc_tool_marker(pd), 200) + "\n\n")
-    except sqlite3.Error:
-        return "".join(out)  # partial render beats none
-    finally:
-        con.close()
+                        out.append(f"### assistant\n\n{text}\n\n")
+                elif bt == "tool":
+                    out.append(clip(_oc_tool_marker(b), 200) + "\n\n")
+                # reasoning / step markers carry nothing durable — dropped by policy
     return "".join(out)
 
 
+def _render_v1(con, session_id) -> str:
+    """v1: parts live in their own table, joined to messages."""
+    out: list = []
+    msgs = con.execute(
+        "select id, data from message where session_id = ? order by time_created, id",
+        (session_id,),
+    ).fetchall()
+    for _mid, mdata in msgs:
+        try:
+            md = json.loads(mdata)
+        except json.JSONDecodeError:
+            continue
+        role = md.get("role") or "user"
+        for (pdata,) in con.execute(
+            "select data from part where message_id = ? order by time_created, id",
+            (_mid,),
+        ).fetchall():
+            try:
+                pd = json.loads(pdata)
+            except json.JSONDecodeError:
+                continue
+            ptype = pd.get("type")
+            if ptype == "text":
+                text = (pd.get("text") or "").strip()
+                if text:
+                    out.append(f"### {role}\n\n{text}\n\n")
+            elif ptype == "tool":
+                out.append(clip(_oc_tool_marker(pd), 200) + "\n\n")
+    return "".join(out)
+
+
+def render_opencode_session(session_id, db=None) -> str:
+    """Render one opencode session to the shared text vocabulary. Never raises.
+    Prefers v2 and falls back to v1 — a session lives in exactly one of them."""
+    try:
+        con = _oc_connect(db)
+    except sqlite3.Error:
+        return ""
+    out = ""
+    try:
+        if _has_table(con, "session_message"):
+            out = _render_v2(con, session_id)
+        if not out and _has_table(con, "message"):
+            out = _render_v1(con, session_id)
+    except sqlite3.Error:
+        return out
+    finally:
+        con.close()
+    return out
+
+
 def opencode_first_user_text(session_id, db=None) -> str:
-    """The first user text part of a session (empty string if none). Never raises."""
+    """First user message of a session ("" if none). Handles both schemas."""
     try:
         con = _oc_connect(db)
     except sqlite3.Error:
         return ""
     try:
-        row = con.execute(
-            "select p.data from part p join message m on m.id = p.message_id "
-            "where p.session_id = ? and json_extract(m.data,'$.role') = 'user' "
-            "  and json_extract(p.data,'$.type') = 'text' "
-            "order by p.time_created, p.id limit 1",
-            (session_id,),
-        ).fetchone()
+        if _has_table(con, "session_message"):
+            row = con.execute(
+                "select data from session_message where session_id = ? "
+                "and type = 'user' order by seq limit 1",
+                (session_id,),
+            ).fetchone()
+            if row:
+                try:
+                    return (json.loads(row[0]).get("text") or "").strip()
+                except json.JSONDecodeError:
+                    return ""
+        if _has_table(con, "part"):
+            row = con.execute(
+                "select p.data from part p join message m on m.id = p.message_id "
+                "where p.session_id = ? and json_extract(m.data,'$.role') = 'user' "
+                "  and json_extract(p.data,'$.type') = 'text' "
+                "order by p.time_created, p.id limit 1",
+                (session_id,),
+            ).fetchone()
     except sqlite3.Error:
         return ""
     finally:
@@ -331,37 +433,52 @@ def opencode_session_meta(session_id, db=None) -> dict:
     except sqlite3.Error:
         return blank
     try:
-        row = con.execute(
-            "select title, time_created from session where id = ?", (session_id,)
-        ).fetchone()
-        # The most frequent modelID across assistant messages (they carry it;
-        # user messages do not).
-        models = [
-            m for (m,) in con.execute(
-                "select json_extract(data,'$.modelID') from message "
-                "where session_id = ? and json_extract(data,'$.modelID') is not null",
+        row = None
+        if _has_table(con, "session_v2"):
+            row = con.execute(
+                "select title, time_created from session_v2 where id = ?",
                 (session_id,),
-            ) if m
-        ]
+            ).fetchone()
+        if row is None and _has_table(con, "session"):
+            row = con.execute(
+                "select title, time_created from session where id = ?", (session_id,)
+            ).fetchone()
+
+        # Most frequent model across assistant messages (they carry it; user
+        # messages do not). v2 stores model as {id, providerID}; v1 as a flat
+        # string on the message.
+        models = []
+        if _has_table(con, "session_message"):
+            for (m,) in con.execute(
+                "select data from session_message where session_id = ? and type = 'assistant'",
+                (session_id,),
+            ):
+                try:
+                    mid = (json.loads(m).get("model") or {}).get("id")
+                except json.JSONDecodeError:
+                    mid = None
+                if mid:
+                    models.append(mid)
+        if not models and _has_table(con, "message"):
+            for (d,) in con.execute(
+                "select data from message where session_id = ?", (session_id,)
+            ):
+                try:
+                    md = json.loads(d)
+                except json.JSONDecodeError:
+                    continue
+                if md.get("modelID"):
+                    models.append(md["modelID"])
         model = max(set(models), key=models.count) if models else ""
-        first_prompt = con.execute(
-            "select p.data from part p join message m on m.id = p.message_id "
-            "where p.session_id = ? and json_extract(m.data,'$.role') = 'user' "
-            "  and json_extract(p.data,'$.type') = 'text' "
-            "order by p.time_created, p.id limit 1",
-            (session_id,),
-        ).fetchone()
     except sqlite3.Error:
         return blank
     finally:
         con.close()
 
     title, created = (row[0], row[1]) if row else ("", None)
-    if first_prompt:
-        try:
-            title = title or (json.loads(first_prompt[0]).get("text") or "").strip()
-        except json.JSONDecodeError:
-            pass
+    if not title:
+        first = opencode_first_user_text(session_id, db=db)
+        title = first.strip()
 
     occurred = ""
     if created:
