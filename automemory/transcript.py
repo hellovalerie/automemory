@@ -202,7 +202,12 @@ def _has_table(con, name: str) -> bool:
 
 def opencode_session_ids(directory, db=None) -> list:
     """Session ids for a project directory, newest-first, across BOTH schemas.
-    Never raises; duplicates impossible."""
+
+    Ordered by LAST ACTIVITY (time_updated), not creation time. Creation order is
+    wrong for backfill priority: a long-running session is current work but looks
+    ancient. Measured 2026-10-16 — a session open since Oct 15 sat at position 52
+    of 54 and would never be reached under a cap, purely because it started
+    early. Never raises; duplicates impossible."""
     try:
         con = _oc_connect(db)
     except sqlite3.Error:
@@ -210,19 +215,22 @@ def opencode_session_ids(directory, db=None) -> list:
     out = []
     try:
         if _has_table(con, "session_v2"):
-            out += [r[0] for r in con.execute(
-                "select id from session_v2 where directory = ? order by time_created desc",
-                (str(directory),))]
+            out += list(con.execute(
+                "select id, coalesce(time_updated, time_created) from session_v2 "
+                "where directory = ?",
+                (str(directory),)))
         if _has_table(con, "session"):
-            out += [r[0] for r in con.execute(
-                "select id from session where directory = ? order by time_created desc",
-                (str(directory),))]
+            out += list(con.execute(
+                "select id, coalesce(time_updated, time_created) from session "
+                "where directory = ?",
+                (str(directory),)))
     except sqlite3.Error:
-        return out
+        return [s for s, _ in out]
     finally:
         con.close()
+    out.sort(key=lambda p: p[1] or 0, reverse=True)
     seen, uniq = set(), []
-    for s in out:
+    for s, _ in out:
         if s not in seen:
             seen.add(s)
             uniq.append(s)
