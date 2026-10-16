@@ -76,16 +76,29 @@ _NO_TOOLS = [
 # WRONG — the test that seemed to prove it never passed --agent, so the permission
 # was not in effect. Selecting the agent 403s like everything else.
 _OC_SCRIBE_AGENT = "automemory-scribe"
+# A path that never exists. Its only job is to be the one surviving `allow` that
+# keeps the `read` tool in the request — see the note on _OC_BLIND_CONFIG. If this
+# ever does exist, treat it as a misconfiguration, not as intent.
+_OC_READ_ALLOWLIST = "/nonexistent-automemory-scribe-allowlist/*"
 _OC_BLIND_CONFIG = {
     "agent": {
         _OC_SCRIBE_AGENT: {
             "description": "Blind transcription scribe: summarizes a supplied "
                            "transcript. Reads only the text it is given.",
             "mode": "subagent",
-            # `read` deliberately NOT denied — see the note above: on the free
-            # tier, denying it 403s every call. Everything else is off, so the
-            # scribe still cannot write, execute, or reach the vault's writes.
+            # `read` is a PATTERN block, not "deny". The server-side free-tier
+            # check (upstream #50627) keeps `read` in the request only if at least
+            # one `allow` survives — a bare "deny", or {"*":"deny"}, removes the
+            # tool and 403s the call. Measured 1.19.0:
+            #   read:"deny"                              -> 403
+            #   read:{"*":"deny"}                        -> 403
+            #   read:{"*":"deny","<one path>":"allow"}   -> OK, and the deny holds
+            # So the scribe gets read access to a path that never exists, which
+            # keeps the tool in the request while leaving it effectively blind.
+            # Verified behaviourally: vault reads and directory listings are
+            # refused with permission.rejected; no canary leaks.
             "permission": {
+                "read": {"*": "deny", _OC_READ_ALLOWLIST: "allow"},
                 "edit": "deny", "glob": "deny", "grep": "deny", "list": "deny",
                 "bash": "deny", "task": "deny", "webfetch": "deny",
                 "websearch": "deny", "lsp": "deny", "skill": "deny",
