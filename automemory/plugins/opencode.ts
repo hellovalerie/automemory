@@ -81,7 +81,7 @@ const inFlight = new Set<string>()
 const HUMAN_SURFACES = new Set(["tui", "desktop", "ide", "web"])
 
 type ProjectState = "on" | "off" | "asked"
-type Config = { projects: Record<string, ProjectState> }
+type Config = { projects: Record<string, any>; engine_cmd?: string[]; [k: string]: any }
 
 function log(msg: string) {
   try {
@@ -93,14 +93,32 @@ function log(msg: string) {
 }
 
 function readConfig(): Config {
+  // Keep EVERY top-level key: ask-once writes this object back, and dropping
+  // engine_cmd there would silently undo `automemory init`.
   try {
     const fs = require("node:fs")
     if (!fs.existsSync(CONFIG_PATH)) return { projects: {} }
-    return { projects: JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8")).projects ?? {} }
+    const data = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"))
+    return { ...data, projects: data.projects ?? {} }
   } catch {
     return { projects: {} }
   }
 }
+
+/**
+ * How to run the engine. opencode's background server keeps the PATH it was
+ * started with — measured 2026-10-29, a server older than the install failed
+ * every trigger with "Executable not found". So: dev override, else the
+ * absolute command `automemory init`/`enable` recorded, else PATH as a last try.
+ */
+function engineCommand(): [string, string[], Record<string, string>] {
+  if (ENGINE_HOME) return ["python3", ["-m", "automemory", "reconcile"], { PYTHONPATH: ENGINE_HOME }]
+  const rec = readConfig().engine_cmd
+  if (Array.isArray(rec) && rec.length) return [rec[0], [...rec.slice(1), "reconcile"], {}]
+  return ["automemory", ["reconcile"], {}]
+}
+
+const RECONCILE_LOG = `${process.env.HOME}/.local/state/automemory/reconcile.log`
 
 export default {
   id: "automemory",
@@ -192,13 +210,19 @@ export default {
           inFlight.add(dir)
           log(`reconcile trigger session=${sid} dir=${dir}`)
 
-          const [cmd, args, extraEnv]: [string, string[], Record<string, string>] = ENGINE_HOME
-            ? ["python3", ["-m", "automemory", "reconcile"], { PYTHONPATH: ENGINE_HOME }]
-            : ["automemory", ["reconcile"], {}]
+          const [cmd, args, extraEnv] = engineCommand()
+          // The engine's own output goes to a log, not /dev/null — a failed
+          // reconcile must leave a trace (issue #5, layer 1).
+          let out: any = "ignore"
+          try {
+            fs.mkdirSync(`${process.env.HOME}/.local/state/automemory`, { recursive: true })
+            out = fs.openSync(RECONCILE_LOG, "a")
+            fs.writeSync(out, `\n=== ${new Date().toISOString()} session=${sid} dir=${dir}\n`)
+          } catch {}
           const child = spawn(cmd, args, {
             cwd: dir,
             detached: true,
-            stdio: ["pipe", "ignore", "ignore"],
+            stdio: ["pipe", out, out],
             env: { ...process.env, ...extraEnv, AUTOMEMORY_SCRIBE: "1" },
           })
           // A missing command must leave a trace, not vanish (issue #5).
@@ -208,6 +232,7 @@ export default {
           })
           child.stdin?.end(JSON.stringify({ cwd: dir, session_id: sid }))
           child.unref()
+          if (typeof out === "number") try { fs.closeSync(out) } catch {}
           setTimeout(() => inFlight.delete(dir), 120_000)
         } catch (e) {
           inFlight.delete(dir)

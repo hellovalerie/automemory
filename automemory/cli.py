@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -171,6 +172,7 @@ def cmd_init(_args) -> int:
               f"not a hook file.")
         print(f"automemory: opencode plugin {install_opencode_plugin()} "
               f"-> {OPENCODE_PLUGIN_DEST}")
+        print(f"automemory: plugin will run {' '.join(record_engine_command())}")
         state = _consent_state(_consent_load().get(str(project.resolve())))
         if state == "on":
             print(f"automemory: recording already enabled for {project}")
@@ -226,17 +228,56 @@ def _consent_path() -> Path:
                 or (Path.home() / ".config" / "opencode" / "automemory.json"))
 
 
-def _consent_load() -> dict:
+def _config_load() -> dict:
+    """The whole global config: {"projects": {...}, "engine_cmd": [...]}."""
     try:
-        return json.loads(_consent_path().read_text(encoding="utf-8")).get("projects", {})
+        data = json.loads(_consent_path().read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
 
 
-def _consent_save(projects: dict) -> None:
+def _config_save(data: dict) -> None:
     p = _consent_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({"projects": projects}, indent=2) + "\n", encoding="utf-8")
+    p.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _consent_load() -> dict:
+    return _config_load().get("projects", {})
+
+
+def _consent_save(projects: dict) -> None:
+    # Read-modify-write: other top-level keys (engine_cmd) must survive.
+    data = _config_load()
+    data["projects"] = projects
+    _config_save(data)
+
+
+def engine_command() -> list:
+    """How to run THIS install of automemory, as an absolute command.
+
+    The opencode plugin runs inside opencode's long-lived background server,
+    whose PATH is frozen at whenever it started. Measured 2026-10-29: a server
+    started before `~/.local/bin` joined PATH failed every trigger with
+    "Executable not found in $PATH" until it was restarted. Recording the
+    absolute path at setup time takes PATH out of the chain entirely."""
+    exe = Path(sys.argv[0])
+    if exe.name == "automemory" and exe.is_absolute() and exe.exists():
+        return [str(exe)]
+    found = shutil.which("automemory")
+    if found:
+        return [found]
+    return [sys.executable, "-m", "automemory"]  # run as `python -m automemory`
+
+
+def record_engine_command() -> list:
+    cmd = engine_command()
+    data = _config_load()
+    if data.get("engine_cmd") != cmd:
+        data["engine_cmd"] = cmd
+        _config_save(data)
+    return cmd
 
 
 def _consent_state(entry) -> str:
@@ -259,6 +300,7 @@ def cmd_enable(args) -> int:
         entry["records_dir"] = projects[proj]["records_dir"]  # preserve on re-enable
     projects[proj] = entry
     _consent_save(projects)
+    record_engine_command()  # enabling is a setup moment too — pin the engine path
     print(f"automemory: recording enabled for {proj}")
     if entry.get("records_dir"):
         print(f"  records -> {entry['records_dir']}")
