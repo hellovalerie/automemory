@@ -1,6 +1,6 @@
 """automemory — a passive capture engine for AI conversations.
 
-Record core + pluggable capture strategies (see product/BUILD-SPEC.md).
+Record core + pluggable capture strategies (see dev/design/BUILD-SPEC.md).
 Python 3, standard library only — zero third-party dependencies.
 """
 

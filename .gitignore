@@ -4,7 +4,7 @@
 .capture-extractor.tmp
 
 # Regenerable local output — genuinely never wanted in either repo.
-transcript-extractor/parsed/
+dev/transcript-extractor/parsed/
 *.egg-info/
 
 # ── NOT ignored ───────────────────────────────────────────────────────────────

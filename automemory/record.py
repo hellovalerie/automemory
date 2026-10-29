@@ -1,6 +1,6 @@
 """Record core — the shared envelope both engines write into.
 
-Spec: system/design/RECORD-CORE.md. Plain markdown + git, stdlib only (no YAML
+Spec: dev/design/RECORD-CORE.md. Plain markdown + git, stdlib only (no YAML
 dependency — the frontmatter format is a controlled flat `key: value` block).
 
 Two jobs live here and nothing else (the core is the envelope, not the contents):

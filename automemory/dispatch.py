@@ -138,7 +138,7 @@ _FRAMING = (
 # project, not the tempdir it was launched in — verified 2026-10-15), so the
 # scribe's own sessions land in the project the reconciler scans. This sentinel
 # rides in the prompt so the reconciler can recognise and skip them. Same idiom
-# as Engine B's guard (system/scripts/capture-worker.sh:427).
+# as Engine B's guard (the removed capture-worker.sh).
 SCRIBE_SENTINEL = "AUTOMEMORY-SCRIBE-RUN"
 
 _MAX_TRANSCRIPT = 250_000  # keep argv well under ARG_MAX; head+tail beyond this

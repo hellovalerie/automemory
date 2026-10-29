@@ -3,7 +3,7 @@
 Two store adapters, ONE rendering vocabulary:
 
   - Claude Code: JSONL at ~/.claude/projects/<slug>/<uuid>.jsonl
-    (stdlib-only port of system/scripts/transcript-to-text.sh — removes the jq dep)
+    (stdlib-only port of Engine B's (removed) transcript-to-text.sh — removes the jq dep)
   - opencode:    SQLite at ~/.local/share/opencode/opencode.db
     (tables session/message/part; ids look like `ses_…`)
 
