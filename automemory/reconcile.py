@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import dispatch, providers, record, redact, transcript
+from . import dispatch, memory_mirror, providers, record, redact, transcript
 
 DEFAULT_CAP = 5
 # The scribe model is NOT a constant — see providers.py. `DEFAULT_MODEL = "haiku"`
@@ -422,9 +422,24 @@ def run(payload: dict, *, provider: str = None, claude_projects_root=None,
         out.write(f"automemory: {len(deferred)} older session(s) pending — "
                   f"run `automemory process` to catch up.\n")
 
+    # 4. mirror the agent's own memory (Claude Code only — opencode has no such dir).
+    # Runs every time: memory can change without any new session.
+    mem = memory_mirror.MirrorResult()
+    if isinstance(source, _ClaudeCodeSource):
+        mem = memory_mirror.sync(
+            memory_mirror.memory_dir_for(source.projects_root, _slug_for_cwd(cwd)),
+            memory_mirror.mirror_dir_for(records_dir))
+        if mem.touched():
+            bits = [f"{n} {w}" for n, w in
+                    ((mem.new, "new"), (mem.superseded, "superseded"), (mem.retired, "retired")) if n]
+            out.write(f"automemory: mirrored memory ({', '.join(bits)}).\n")
+
     return {"provider": source.name, "missing": len(missing), "processed": len(todo),
             "wrote": wrote, "deferred": len(deferred), "cost": total_cost,
-            "outcomes": outcomes}
+            "outcomes": outcomes,
+            "memory": {"new": mem.new, "superseded": mem.superseded,
+                       "retired": mem.retired, "unchanged": mem.unchanged,
+                       "skipped": mem.skipped}}
 
 
 def main() -> int:
