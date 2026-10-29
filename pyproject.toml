@@ -16,4 +16,4 @@ automemory = "automemory.cli:main"
 packages = ["automemory"]
 
 [tool.setuptools.package-data]
-automemory = ["prompts/*.md"]
+automemory = ["prompts/*.md", "plugins/*.ts"]

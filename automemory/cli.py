@@ -126,6 +126,27 @@ def _detect_provider(cwd: Path) -> str:
         return providers.DEFAULT.name
 
 
+OPENCODE_PLUGIN_SRC = Path(__file__).resolve().parent / "plugins" / "opencode.ts"
+OPENCODE_PLUGIN_DEST = Path.home() / ".config" / "opencode" / "plugin" / "automemory.ts"
+
+
+def install_opencode_plugin(src: Path = OPENCODE_PLUGIN_SRC,
+                            dest: Path = OPENCODE_PLUGIN_DEST) -> str:
+    """Copy the shipped trigger plugin into opencode's global plugin dir.
+    'installed' | 'updated' | 'already current'. opencode only loads it on its
+    next start — it does not hot-reload plugins."""
+    new = src.read_text(encoding="utf-8")
+    if dest.exists():
+        if dest.read_text(encoding="utf-8") == new:
+            return "already current"
+        verdict = "updated"
+    else:
+        verdict = "installed"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(new, encoding="utf-8")
+    return verdict
+
+
 def cmd_init(_args) -> int:
     project = Path.cwd()
     prov = providers.resolve(_detect_provider(project))
@@ -146,9 +167,11 @@ def cmd_init(_args) -> int:
         # opencode has no hook file. Wiring a .claude/settings.json here would
         # report success and do nothing — the trigger is the global plugin, and
         # this project needs a consent entry.
-        state = _consent_state(_consent_load().get(str(project.resolve())))
         print(f"automemory: provider {prov.name} — trigger is the global plugin, "
               f"not a hook file.")
+        print(f"automemory: opencode plugin {install_opencode_plugin()} "
+              f"-> {OPENCODE_PLUGIN_DEST}")
+        state = _consent_state(_consent_load().get(str(project.resolve())))
         if state == "on":
             print(f"automemory: recording already enabled for {project}")
         else:
