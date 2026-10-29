@@ -32,8 +32,8 @@ DEFAULT_CAP = 5
 # used to live here and broke every opencode backfill (its model namespace rejects
 # "haiku"). Callers must go through dispatch.default_model(provider).
 PROVIDER_ENV = "AUTOMEMORY_PROVIDER"
-_ENGINE_ROOT = Path(__file__).resolve().parents[1]
-_PROMPT_PATH = _ENGINE_ROOT / "system" / "engine" / "prompts" / "record-author.md"
+# Inside the package, so every install (editable or not) ships it.
+_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "record-author.md"
 
 
 def _slug_for_cwd(cwd: str) -> str:
@@ -278,6 +278,32 @@ def resolve_source(cwd: str, provider: str = None, **kw) -> _Source:
     return cc if cc.list_ids(cwd) else oc
 
 
+def resolve_sources(cwd: str, provider: str = None, **kw) -> list:
+    """EVERY provider store that holds sessions for this cwd — the reconciler's
+    entry point. A project driven by both Claude Code and opencode must have both
+    captured; `resolve_source` above picks ONE and is only for trigger wiring
+    (init/status), which genuinely is per-harness.
+
+    An explicit provider (arg or AUTOMEMORY_PROVIDER) still narrows to one, but
+    run() says so out loud — a silent pin is how an alias once hid 54 sessions.
+    """
+    if provider or os.environ.get(PROVIDER_ENV):
+        return [resolve_source(cwd, provider=provider, **kw)]
+    found = [s for s in (_ClaudeCodeSource(projects_root=kw.get("claude_projects_root")),
+                         _OpencodeSource(db=kw.get("opencode_db")))
+             if s.list_ids(cwd)]
+    return found or [_ClaudeCodeSource(projects_root=kw.get("claude_projects_root"))]
+
+
+def _interleave(lists: list) -> list:
+    """Round-robin merge, so a shared cap can't be spent entirely on one provider."""
+    out, i = [], 0
+    while any(i < len(l) for l in lists):
+        out.extend(l[i] for l in lists if i < len(l))
+        i += 1
+    return out
+
+
 # --- core (testable) ----------------------------------------------------------
 
 
@@ -380,18 +406,22 @@ def records_dir_for(cwd: str) -> Path:
 
 def run(payload: dict, *, provider: str = None, claude_projects_root=None,
         opencode_db=None, dispatch_fn=None, cap: int = DEFAULT_CAP, out=None) -> dict:
-    """Orchestrate handover-in + bounded backfill. Returns a summary dict."""
+    """Orchestrate handover-in + bounded backfill across EVERY provider with
+    sessions in this project. Returns a summary dict."""
     out = out or sys.stdout
     cwd = payload.get("cwd") or os.getcwd()
     current = payload.get("session_id") or ""
     project = Path(cwd).name or "project"
     records_dir = records_dir_for(cwd)
-    source = resolve_source(cwd, provider=provider,
-                            claude_projects_root=claude_projects_root,
-                            opencode_db=opencode_db)
-    dispatch_fn = dispatch_fn or dispatch.DISPATCHERS.get(
-        source.name, dispatch.author)
+    sources = resolve_sources(cwd, provider=provider,
+                              claude_projects_root=claude_projects_root,
+                              opencode_db=opencode_db)
     prompt = _load_prompt()
+
+    pinned = provider or os.environ.get(PROVIDER_ENV)
+    if pinned:
+        out.write(f"automemory: WARNING — provider pinned to {sources[0].name} "
+                  f"({PROVIDER_ENV}); other providers' sessions are NOT captured.\n")
 
     # 1. handover-in
     idx = records_dir / "INDEX.md"
@@ -401,16 +431,20 @@ def run(payload: dict, *, provider: str = None, claude_projects_root=None,
     out.write("automemory: at a natural checkpoint, write/refresh this session's record "
               "(## Done required, else skip) into agent-records/.\n")
 
-    # 2. find missing
-    missing = find_missing(source, records_dir, cwd, current)
+    # 2. find missing — per provider, then one shared cap across all of them
+    per_source = [[(src, ref) for ref in find_missing(src, records_dir, cwd, current)]
+                  for src in sources]
+    missing = _interleave(per_source)
     todo, deferred = missing[:cap], missing[cap:]
 
-    # 3. backfill
+    # 3. backfill — each session is authored by its own provider's dispatcher
     total_cost, wrote = 0.0, 0
     outcomes = []
-    for ref in todo:
-        r = backfill_one(source, ref, records_dir, project, prompt,
-                         dispatch.default_model(source.name), dispatch_fn, cwd)
+    for src, ref in todo:
+        fn = dispatch_fn or dispatch.DISPATCHERS.get(src.name, dispatch.author)
+        r = backfill_one(src, ref, records_dir, project, prompt,
+                         dispatch.default_model(src.name), fn, cwd)
+        r["provider"] = src.name
         outcomes.append(r)
         total_cost += r.get("cost", 0.0)
         if r["status"] == "ok":
@@ -422,21 +456,26 @@ def run(payload: dict, *, provider: str = None, claude_projects_root=None,
         out.write(f"automemory: {len(deferred)} older session(s) pending — "
                   f"run `automemory process` to catch up.\n")
 
-    # 4. mirror the agent's own memory (Claude Code only — opencode has no such dir).
+    # 4. mirror the agent's own memory. Claude Code only (opencode has no such dir),
+    # but keyed on the STORE, not on which provider won detection — a project that
+    # also has opencode sessions still has a Claude memory dir to mirror.
     # Runs every time: memory can change without any new session.
     mem = memory_mirror.MirrorResult()
-    if isinstance(source, _ClaudeCodeSource):
+    cc = next((s for s in sources if isinstance(s, _ClaudeCodeSource)), None)
+    if cc is None and not pinned:
+        cc = _ClaudeCodeSource(projects_root=claude_projects_root)
+    if cc is not None:
         mem = memory_mirror.sync(
-            memory_mirror.memory_dir_for(source.projects_root, _slug_for_cwd(cwd)),
+            memory_mirror.memory_dir_for(cc.projects_root, _slug_for_cwd(cwd)),
             memory_mirror.mirror_dir_for(records_dir))
         if mem.touched():
             bits = [f"{n} {w}" for n, w in
                     ((mem.new, "new"), (mem.superseded, "superseded"), (mem.retired, "retired")) if n]
             out.write(f"automemory: mirrored memory ({', '.join(bits)}).\n")
 
-    return {"provider": source.name, "missing": len(missing), "processed": len(todo),
-            "wrote": wrote, "deferred": len(deferred), "cost": total_cost,
-            "outcomes": outcomes,
+    return {"providers": [s.name for s in sources], "missing": len(missing),
+            "processed": len(todo), "wrote": wrote, "deferred": len(deferred),
+            "cost": total_cost, "outcomes": outcomes,
             "memory": {"new": mem.new, "superseded": mem.superseded,
                        "retired": mem.retired, "unchanged": mem.unchanged,
                        "skipped": mem.skipped}}

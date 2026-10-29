@@ -15,7 +15,5 @@ automemory = "automemory.cli:main"
 [tool.setuptools]
 packages = ["automemory"]
 
-# TODO (packaging, pre-brew): ship the engine prompts as package data so a
-# non-editable install resolves system/engine/prompts/record-author.md.
-# Editable (dev) installs already resolve it from the source tree; reconcile
-# falls back to an embedded default prompt if the file isn't found.
+[tool.setuptools.package-data]
+automemory = ["prompts/*.md"]
