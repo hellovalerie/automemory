@@ -383,6 +383,22 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
     return {"uuid": ref, "status": "ok", "cost": result.cost_usd, "path": str(path)}
 
 
+def _summary_line(outcomes: list, cost: float) -> str:
+    """One line per run: checked / written / declined / failed. `declined` = the
+    scribe's write-gate said NO-RECORD; `empty` = nothing renderable (no call)."""
+    if not outcomes:
+        return "automemory: run — nothing new to check."
+    n = lambda *st: sum(1 for o in outcomes if o["status"] in st)
+    parts = [f"{n('ok')} written", f"{n('no-record')} declined"]
+    if n("empty"):
+        parts.append(f"{n('empty')} empty")
+    failed = n("dispatch-error", "malformed")
+    if failed:
+        parts.append(f"{failed} FAILED")
+    return (f"automemory: run — checked {len(outcomes)}: {', '.join(parts)} "
+            f"(~${cost:.2f}).")
+
+
 def records_dir_for(cwd: str) -> Path:
     """Where this project's records live.
 
@@ -451,7 +467,13 @@ def run(payload: dict, *, provider: str = None, claude_projects_root=None,
             wrote += 1
     if wrote:
         record.rebuild_index(records_dir, records_dir / "INDEX.md", records_link_prefix="")
-        out.write(f"automemory: backfilled {wrote} session(s), ~${total_cost:.2f}.\n")
+    # ALWAYS report, even when nothing was written: a run that checked sessions and
+    # declined them all must not look the same as a run that never happened (#5).
+    out.write(_summary_line(outcomes, total_cost) + "\n")
+    for o in outcomes:
+        if o["status"] in ("dispatch-error", "malformed"):
+            out.write(f"automemory:   {o['status']} {o.get('provider', '')}:{o['uuid']}"
+                      f"{' — ' + o['error'].strip()[:200] if o.get('error') else ''}\n")
     if deferred:
         out.write(f"automemory: {len(deferred)} older session(s) pending — "
                   f"run `automemory process` to catch up.\n")
