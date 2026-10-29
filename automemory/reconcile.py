@@ -144,6 +144,12 @@ class _Source:
         """True if the session has anything a scribe could summarise."""
         return True
 
+    def scribe_models(self, ref: str, cwd: str = None) -> list:
+        """Models to try for this session's scribe, in order. The engine never
+        names a model itself: the user's configured choice, else the provider's
+        own default (None = don't pass --model)."""
+        return [dispatch.default_model(self.name)]
+
 
 class _ClaudeCodeSource(_Source):
     """Claude Code: one JSONL file per session under ~/.claude/projects/<slug>/.
@@ -204,6 +210,22 @@ class _OpencodeSource(_Source):
 
     def __init__(self, db=None):
         self.db = db
+        self._available = None  # `opencode models`, fetched once per run
+
+    def _available_models(self):
+        """What opencode can route right now, or None if we can't tell. A retired
+        model can HANG for the full dispatch timeout rather than erroring
+        (measured 2026-10-29), so dead candidates are dropped before any call."""
+        if self._available is None:
+            try:
+                import subprocess
+                p = subprocess.run(["opencode", "models"], capture_output=True,
+                                   text=True, timeout=60)
+                listed = {l.strip() for l in p.stdout.splitlines() if "/" in l}
+                self._available = listed if (p.returncode == 0 and listed) else set()
+            except (OSError, subprocess.SubprocessError):
+                self._available = set()
+        return self._available or None
 
     def list_ids(self, cwd: str) -> list:
         return transcript.opencode_session_ids(cwd, db=self.db)
@@ -213,6 +235,23 @@ class _OpencodeSource(_Source):
 
     def meta(self, ref: str, cwd: str = None) -> dict:
         return transcript.opencode_session_meta(ref, db=self.db)
+
+    def scribe_models(self, ref: str, cwd: str = None) -> list:
+        """User's configured model, then the model the session itself ran on,
+        then the model the user is on NOW (latest session anywhere) — so an old
+        session whose model has since been retired still gets a scribe. NOT
+        "omit --model": opencode then picks the head of its recently-used
+        list, which can be a retired model (measured 2026-10-29 — it was), and
+        with the scribe agent that hangs instead of erroring."""
+        out = []
+        for m in (dispatch.default_model(self.name),
+                  transcript.opencode_session_model_ref(ref, db=self.db),
+                  transcript.opencode_latest_model_ref(db=self.db)):
+            if m and m not in out:
+                out.append(m)
+        avail = self._available_models()
+        live = [m for m in out if avail is None or m in avail]
+        return live or out  # can't verify any? try them anyway, errors are logged
 
     def is_scribe(self, ref: str, cwd: str = None) -> bool:
         # cwd is accepted for interface parity with the Claude source, which needs
@@ -332,8 +371,26 @@ def find_missing(source: _Source, records_dir: Path, cwd: str, current_session: 
     return out
 
 
+_MODEL_GONE = ("model is unavailable", "model unavailable", "no-route",
+               "invalid model", "unknown model", "model not found",
+               "timed out")  # a dead model can hang instead of erroring
+
+
+def _dispatch_first_working(dispatch_fn, text: str, prompt: str, models: list):
+    """Try each candidate model; move on only when the MODEL is the problem
+    (retired, unrouted, unknown). Any other result — success or a different
+    error — is returned as-is."""
+    result = None
+    for m in models or [None]:
+        result = dispatch_fn(text, prompt, model=m)
+        if not (result.is_error and any(g in (result.error or "").lower()
+                                        for g in _MODEL_GONE)):
+            return result
+    return result
+
+
 def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
-                 prompt: str, model: str, dispatch_fn, cwd: str = None):
+                 prompt: str, model, dispatch_fn, cwd: str = None):
     """Render -> redact -> author (1 retry on malformed) -> write. Returns an
     outcome dict; never raises."""
     text = source.render(ref, cwd)
@@ -349,16 +406,18 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
     #    payload succeeded on one run and failed the next four. A provider that
     #    drops the occasional request shouldn't cost the session its record.
     # "not found" and malformed-binary errors are permanent; don't hammer those.
-    _PERMANENT = ("not found", "no such file")
+    _PERMANENT = ("not found", "no such file", "unavailable", "invalid model")
     dispatch_tries, max_dispatch_tries = 0, 3
+    models = model if isinstance(model, list) else [model]
+    call = lambda: _dispatch_first_working(dispatch_fn, scrubbed, prompt, models)
     for _ in (1, 2):  # author, retry once on malformed
-        result = dispatch_fn(scrubbed, prompt, model=model)
+        result = call()
         while result.is_error and dispatch_tries < max_dispatch_tries:
             if any(p in result.error.lower() for p in _PERMANENT):
                 break
             dispatch_tries += 1
             time.sleep(min(2 ** dispatch_tries, 8))
-            result = dispatch_fn(scrubbed, prompt, model=model)
+            result = call()
         if result.is_error:
             return {"uuid": ref, "status": "dispatch-error", "error": result.error,
                     "cost": result.cost_usd}
@@ -459,7 +518,7 @@ def run(payload: dict, *, provider: str = None, claude_projects_root=None,
     for src, ref in todo:
         fn = dispatch_fn or dispatch.DISPATCHERS.get(src.name, dispatch.author)
         r = backfill_one(src, ref, records_dir, project, prompt,
-                         dispatch.default_model(src.name), fn, cwd)
+                         src.scribe_models(ref, cwd), fn, cwd)
         r["provider"] = src.name
         outcomes.append(r)
         total_cost += r.get("cost", 0.0)

@@ -61,7 +61,7 @@ class Provider:
     cli: str
     #: The cheap backfill scribe model, in THIS provider's namespace. Namespaces
     #: do not overlap: opencode rejects "haiku" outright.
-    scribe_model: str
+    scribe_model: "str | None"   # None = the provider's own current default
 
     # --- session trigger (how backfill is requested) -------------------------
     #: Does this harness expose a session lifecycle event a plugin/hook can use?
@@ -85,6 +85,10 @@ CLAUDE_CODE = Provider(
     name="claude-code",
     aliases=("claude", "claude_code", "cc"),
     cli="claude",
+    # An ALIAS, not a version: Claude Code resolves "haiku" to the current
+    # Haiku, so it doesn't rot when models are released or retired. It is also
+    # independent of the session's model — switching Opus -> Sonnet in-session
+    # doesn't touch the scribe.
     scribe_model="haiku",
     has_lifecycle_hook=True,
     wiring="settings-file",   # .claude/settings.json, merged never clobbered
@@ -98,7 +102,11 @@ OPENCODE = Provider(
     name="opencode",
     aliases=("open-code", "oc"),
     cli="opencode",
-    scribe_model="opencode/space-bunny-free",
+    # None = whatever model the user's opencode is currently set to. Never a
+    # named model: opencode lets users switch freely, and free models rotate —
+    # "opencode/space-bunny-free" was hardcoded here until 2026-10-29, was
+    # retired upstream, and every opencode backfill failed "Model is unavailable".
+    scribe_model=None,
     has_lifecycle_hook=False,   # only session.hook("prompt") fires; see below
     wiring="consent-only",      # global plugin + per-project consent
     store_kind="sqlite",
@@ -133,7 +141,8 @@ def names() -> list:
     return [p.name for p in _ALL]
 
 
-def scribe_model(name: str = None, fallback: str = None) -> str:
-    """The backfill scribe model for a provider, in that provider's namespace."""
+def scribe_model(name: str = None, fallback: str = None):
+    """The backfill scribe model for a provider, in that provider's namespace.
+    None means "don't pass --model": the provider uses its own current default."""
     p = resolve(name)
     return fallback if fallback is not None else p.scribe_model

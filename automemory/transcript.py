@@ -497,6 +497,76 @@ def opencode_session_meta(session_id, db=None) -> dict:
     return {"occurred": occurred or "0000-00-00", "title": title[:120], "model": model}
 
 
+def opencode_latest_model_ref(db=None) -> str:
+    """The model the user ran most recently ANYWHERE in opencode — their current
+    choice, which follows them when they switch. `provider/model`, or ""."""
+    try:
+        con = _oc_connect(db)
+    except sqlite3.Error:
+        return ""
+    try:
+        if _has_table(con, "session_message"):
+            for (m,) in con.execute(
+                "select data from session_message where type = 'assistant' "
+                "order by rowid desc limit 50"):
+                try:
+                    md = json.loads(m).get("model") or {}
+                except json.JSONDecodeError:
+                    continue
+                if md.get("id") and md.get("providerID"):
+                    return f"{md['providerID']}/{md['id']}"
+        if _has_table(con, "message"):
+            for (d,) in con.execute("select data from message order by rowid desc limit 200"):
+                try:
+                    md = json.loads(d)
+                except json.JSONDecodeError:
+                    continue
+                if md.get("modelID") and md.get("providerID"):
+                    return f"{md['providerID']}/{md['modelID']}"
+        return ""
+    except sqlite3.Error:
+        return ""
+    finally:
+        con.close()
+
+
+def opencode_session_model_ref(session_id: str, db=None) -> str:
+    """The model the session was LAST running on, as opencode's `provider/model`
+    reference ("" if unknown). Last, not most frequent: if the user switched
+    mid-session, the model they ended on is the one most likely still available.
+    """
+    try:
+        con = _oc_connect(db)
+    except sqlite3.Error:
+        return ""
+    try:
+        if _has_table(con, "session_message"):
+            for (m,) in con.execute(
+                "select data from session_message where session_id = ? "
+                "and type = 'assistant' order by rowid desc", (session_id,)):
+                try:
+                    md = json.loads(m).get("model") or {}
+                except json.JSONDecodeError:
+                    continue
+                if md.get("id") and md.get("providerID"):
+                    return f"{md['providerID']}/{md['id']}"
+        if _has_table(con, "message"):
+            for (d,) in con.execute(
+                "select data from message where session_id = ? order by rowid desc",
+                (session_id,)):
+                try:
+                    md = json.loads(d)
+                except json.JSONDecodeError:
+                    continue
+                if md.get("modelID") and md.get("providerID"):
+                    return f"{md['providerID']}/{md['modelID']}"
+        return ""
+    except sqlite3.Error:
+        return ""
+    finally:
+        con.close()
+
+
 if __name__ == "__main__":
     src = sys.argv[1] if len(sys.argv) > 1 else "/dev/stdin"
     sys.stdout.write(render_file(src))

@@ -179,7 +179,7 @@ def author(
         f"{instruction}\n\n{_FRAMING}\n\n"
         f"--- BEGIN TRANSCRIPT ---\n{_fit(transcript_text)}\n--- END TRANSCRIPT ---"
     )
-    cmd = [cli, "-p", prompt, "--model", model, "--output-format", "json",
+    cmd = [cli, "-p", prompt, *(["--model", model] if model else []), "--output-format", "json",
            "--disallowed-tools", *_NO_TOOLS]  # variadic — keep last
 
     with tempfile.TemporaryDirectory() as neutral:
@@ -280,7 +280,7 @@ def author_opencode(
     transcript_text: str,
     instruction: str,
     *,
-    model: str = "opencode/space-bunny-free",
+    model: str = None,
     cli: str = "opencode",
     timeout_s: int = 180,
 ) -> DispatchResult:
@@ -290,7 +290,7 @@ def author_opencode(
         f"{instruction}\n\n{_FRAMING}\n\n"
         f"--- BEGIN TRANSCRIPT ---\n{_fit(transcript_text)}\n--- END TRANSCRIPT ---"
     )
-    cmd = [cli, "run", prompt, "--model", model, "--format", "json",
+    cmd = [cli, "run", prompt, *(["--model", model] if model else []), "--format", "json",
            "--agent", _OC_SCRIBE_AGENT,
            # --standalone: run a PRIVATE server for this call. Without it,
            # `opencode run` attaches to whatever background server happens to be
@@ -336,5 +336,17 @@ def author_opencode(
 DISPATCHERS = {"claude-code": author, "opencode": author_opencode}
 
 
-def default_model(provider: str, fallback: str = None) -> str:
+def default_model(provider: str, fallback: str = None):
+    """User's choice (global config `scribe_model: {provider: model}`) > the
+    provider's default. None = let the provider use its own current model."""
+    if fallback is None:
+        try:
+            cfg = Path(os.environ.get("AUTOMEMORY_CONFIG")
+                       or (Path.home() / ".config" / "opencode" / "automemory.json"))
+            chosen = (json.loads(cfg.read_text(encoding="utf-8"))
+                      .get("scribe_model") or {}).get(provider)
+            if chosen:
+                return chosen
+        except (OSError, ValueError, AttributeError):
+            pass
     return providers.scribe_model(provider, fallback)
