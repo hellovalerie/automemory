@@ -78,7 +78,8 @@ def _valid_or_norecord(text: str) -> str:
 
 def _transcript_meta(path: Path) -> dict:
     """Best-effort envelope metadata from the transcript (never raises)."""
-    tss, title, model, first_prompt = [], "", "", ""
+    tss, model, first_prompt = [], "", ""
+    custom, ai = "", ""  # the user's rename beats the auto title; the LATEST of each wins
     try:
         for line in path.open(encoding="utf-8", errors="replace"):
             line = line.strip()
@@ -91,9 +92,15 @@ def _transcript_meta(path: Path) -> dict:
             if r.get("timestamp"):
                 tss.append(r["timestamp"])
             t = r.get("type")
-            if t in ("custom-title", "ai-title") and not title:
-                title = (r.get("title") or r.get("customTitle") or r.get("content")
-                         or r.get("text") or "").strip()
+            if t in ("custom-title", "ai-title"):
+                # Claude Code writes {"type":"ai-title","aiTitle":...} — the key this
+                # once missed, so every record fell back to the first prompt's words.
+                got = (r.get("customTitle") or r.get("aiTitle") or r.get("title")
+                       or r.get("content") or r.get("text") or "").strip()
+                if got and t == "custom-title":
+                    custom = got
+                elif got:
+                    ai = got
             if not model:
                 m = r.get("message")
                 cand = (m.get("model") if isinstance(m, dict) else None) or r.get("model")
@@ -107,6 +114,7 @@ def _transcript_meta(path: Path) -> dict:
     except OSError:
         pass
     occurred = min(tss)[:10] if tss else "0000-00-00"
+    title = custom or ai
     if not title:
         title = " ".join(first_prompt.split()[:8]) or f"session {path.stem[:8]}"
     return {"occurred": occurred, "title": title[:120], "model": model}
