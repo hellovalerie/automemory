@@ -482,10 +482,17 @@ def run(payload: dict, *, provider: str = None, claude_projects_root=None,
 
 
 def main() -> int:
-    try:
-        payload = json.loads(sys.stdin.read() or "{}")
-    except json.JSONDecodeError:
+    # A hook pipes a JSON payload in. A person typing `automemory reconcile` has a
+    # keyboard on stdin — reading it would hang until Ctrl-D (hence the old
+    # `</dev/null` workaround). No payload = no live session to exclude, which is
+    # exactly the manual "capture everything, including now" behaviour.
+    if sys.stdin is None or sys.stdin.isatty():
         payload = {}
+    else:
+        try:
+            payload = json.loads(sys.stdin.read() or "{}")
+        except json.JSONDecodeError:
+            payload = {}
     run(payload)
     return 0
 
