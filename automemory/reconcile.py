@@ -667,13 +667,22 @@ def main() -> int:
     # keyboard on stdin — reading it would hang until Ctrl-D (hence the old
     # `</dev/null` workaround). No payload = no live session to exclude, which is
     # exactly the manual "capture everything, including now" behaviour.
-    if sys.stdin is None or sys.stdin.isatty():
-        payload = {}
-    else:
+    # Stdin can also be a pipe that is open but never written or closed (an IDE
+    # task, cron, CI, an agent's shell) — read() would wait forever (measured
+    # 2026-10-30: a run hung 5+ min). A hook writes its payload at once, so wait
+    # briefly for data and treat silence as "no payload".
+    payload = {}
+    if sys.stdin is not None and not sys.stdin.isatty():
+        import select
         try:
-            payload = json.loads(sys.stdin.read() or "{}")
-        except json.JSONDecodeError:
-            payload = {}
+            ready, _, _ = select.select([sys.stdin], [], [], 3.0)
+        except (OSError, ValueError):
+            ready = [sys.stdin]  # not selectable (e.g. a file): just read it
+        if ready:
+            try:
+                payload = json.loads(sys.stdin.read() or "{}")
+            except json.JSONDecodeError:
+                payload = {}
     run(payload)
     return 0
 
