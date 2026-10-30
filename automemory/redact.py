@@ -1,4 +1,4 @@
-"""redact.py — heuristic secret scrub (BUILD-SPEC §7, default-deny).
+"""redact.py — cautious secret scrub (default-deny; dev/design/PRODUCT.md).
 
 Runs on the backfill read: transcript -> [redact] -> author, so credentials
 never reach the authoring model or the stored record.

@@ -1,6 +1,6 @@
 """dispatch.py — headless model call to author a record from a transcript.
 
-Runs `claude -p` as a subprocess (dispatch-via-CLI, BUILD-SPEC §5 — keeps the
+Runs `claude -p` as a subprocess (dispatch-via-CLI — keeps the
 product zero-dependency: no SDK). Verified mechanism (2026-08-13, claude 2.1.212):
   claude -p '<instruction>\n\n<framing>\n--- BEGIN TRANSCRIPT ---\n<transcript>\n--- END TRANSCRIPT ---' \
      --model <m> --output-format json --disallowed-tools <all>   (run in a neutral cwd)
@@ -18,7 +18,7 @@ Design choices:
   - Neutral cwd: run in a tempdir so the call does NOT load the repo's CLAUDE.md
     or project context into the authored record.
   - Never raises for model/CLI failure — returns a DispatchResult with is_error
-    so the reconciler can log-and-continue (no silent failures, BUILD-SPEC §0).
+    so the reconciler can log-and-continue (no silent failures — dev/design/PRODUCT.md).
 """
 from __future__ import annotations
 

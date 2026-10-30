@@ -1,4 +1,4 @@
-"""cli.py — the automemory command surface (MVP subset of BUILD-SPEC §9).
+"""cli.py — the automemory command surface (commands: dev/design/PRODUCT.md).
 
 Commands:
   init       provider-aware setup: scaffold agent-records/ and wire whichever

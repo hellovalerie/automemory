@@ -7,7 +7,7 @@ name = "automemory"
 version = "0.0.1"
 description = "A passive capture engine for AI conversations — record engine + pluggable capture strategies."
 requires-python = ">=3.9"
-dependencies = []  # standard library only, by design (BUILD-SPEC §0)
+dependencies = []  # standard library only, by design (dev/design/PRODUCT.md, Values)
 
 [project.scripts]
 automemory = "automemory.cli:main"
