@@ -572,8 +572,57 @@ def records_dir_for(cwd: str) -> Path:
     return default
 
 
+def handover_text(records_dir: Path) -> str:
+    """What a starting session is shown: the project's session map. (The old
+    "write your own record at a natural checkpoint" fast-path reminder was
+    retired 2026-10-30 — undefined, uncheckable, and it bypassed the format.)"""
+    idx = Path(records_dir) / record.INDEX_NAME
+    if not idx.exists():
+        return ""
+    return ("=== automemory: session map ===\n"
+            + idx.read_text(encoding="utf-8").rstrip() + "\n\n")
+
+
+class _ProjectLock:
+    """One run per project at a time. End-of-session for one session and
+    start-of-session for the next can fire seconds apart; two concurrent runs
+    would both see the same uncovered turns and append the same update twice.
+    A lock older than 30 minutes is treated as stale (a crashed run)."""
+
+    STALE_S = 30 * 60
+
+    def __init__(self, records_dir: Path):
+        self.path = Path(records_dir) / ".run.lock"
+        self.held = False
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if time.time() - self.path.stat().st_mtime > self.STALE_S:
+                self.path.unlink()
+        except OSError:
+            pass
+        try:
+            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, f"{os.getpid()}\n".encode())
+            os.close(fd)
+            self.held = True
+        except FileExistsError:
+            self.held = False
+        return self
+
+    def __exit__(self, *exc):
+        if self.held:
+            try:
+                self.path.unlink()
+            except OSError:
+                pass
+        return False
+
+
 def run(payload: dict, *, provider: str = None, claude_projects_root=None,
-        opencode_db=None, dispatch_fn=None, cap: int = DEFAULT_CAP, out=None) -> dict:
+        opencode_db=None, dispatch_fn=None, cap: int = DEFAULT_CAP, out=None,
+        handover: bool = True) -> dict:
     """Orchestrate handover-in + bounded backfill across EVERY provider with
     sessions in this project. Returns a summary dict."""
     out = out or sys.stdout
@@ -591,99 +640,108 @@ def run(payload: dict, *, provider: str = None, claude_projects_root=None,
         out.write(f"automemory: WARNING — provider pinned to {sources[0].name} "
                   f"({PROVIDER_ENV}); other providers' sessions are NOT captured.\n")
 
-    # 1. handover-in
-    idx = records_dir / "INDEX.md"
-    if idx.exists():
-        out.write("=== automemory: session map ===\n")
-        out.write(idx.read_text(encoding="utf-8").rstrip() + "\n\n")
-    out.write("automemory: at a natural checkpoint, write/refresh this session's record "
-              "(## Done required, else skip) into agent-records/.\n")
+    # 1. handover-in — for the live agent's context. Skipped in background runs,
+    # whose output goes to a log, not to an agent.
+    if handover:
+        out.write(handover_text(records_dir))
 
-    # 2. find missing — per provider, then one shared cap across all of them
-    with progress.Spinner("checking sessions"):
-        per_source = [[(src, ref, cov) for ref, cov in find_pending(src, records_dir, cwd, current)]
-                      for src in sources]
-    missing = _interleave(per_source)
-    todo, deferred = missing[:cap], missing[cap:]
+    # One run per project at a time (end-of-session + next start can overlap).
+    lock = _ProjectLock(records_dir).__enter__()
+    if not lock.held:
+        out.write("automemory: another run is already working on this project — skipped.\n")
+        return {"providers": [s.name for s in sources], "missing": 0, "processed": 0,
+                "wrote": 0, "deferred": 0, "cost": 0.0, "outcomes": [], "skipped": "locked"}
+    try:
+        # 2. find missing — per provider, then one shared cap across all of them
+        with progress.Spinner("checking sessions"):
+            per_source = [[(src, ref, cov) for ref, cov in find_pending(src, records_dir, cwd, current)]
+                          for src in sources]
+        missing = _interleave(per_source)
+        todo, deferred = missing[:cap], missing[cap:]
 
-    # 3. backfill — each session is authored by its own provider's dispatcher
-    total_cost, wrote = 0.0, 0
-    outcomes = []
-    _VERB = {"ok": "✓ wrote", "updated": "✓ continued", "no-record": "· declined",
-             "empty": "· empty", "dispatch-error": "✗ FAILED", "malformed": "✗ FAILED"}
-    for i, (src, ref, cov) in enumerate(todo, 1):
-        fn = dispatch_fn or dispatch.DISPATCHERS.get(src.name, dispatch.author)
-        name = _display_name(src, ref, cwd)
-        what = "continuing" if cov is not None and record.find_record(records_dir, ref) else "writing"
-        with progress.Spinner(f"{what} {i}/{len(todo)} · {src.name} · {name}"):
-            r = backfill_one(src, ref, records_dir, project, prompt,
-                             src.scribe_models(ref, cwd), fn, cwd, covered=cov)
-        progress.note(f"  {_VERB.get(r['status'], r['status'])} {name}")
-        r["provider"] = src.name
-        outcomes.append(r)
-        total_cost += r.get("cost", 0.0)
-        if r["status"] in ("ok", "updated"):
-            wrote += 1
-    if any(o["status"] in ("ok", "updated", "no-record") for o in outcomes):
-        record.rebuild_index(records_dir)
-    # ALWAYS report, even when nothing was written: a run that checked sessions and
-    # declined them all must not look the same as a run that never happened (#5).
-    out.write(_summary_line(outcomes, total_cost) + "\n")
-    for o in outcomes:
-        if o["status"] in ("dispatch-error", "malformed"):
-            out.write(f"automemory:   {o['status']} {o.get('provider', '')}:{o['uuid']}"
-                      f"{' — ' + o['error'].strip()[:200] if o.get('error') else ''}\n")
-    if deferred:
-        out.write(f"automemory: {len(deferred)} older session(s) pending — "
-                  f"run `automemory process` to catch up.\n")
+        # 3. backfill — each session is authored by its own provider's dispatcher
+        total_cost, wrote = 0.0, 0
+        outcomes = []
+        _VERB = {"ok": "✓ wrote", "updated": "✓ continued", "no-record": "· declined",
+                 "empty": "· empty", "dispatch-error": "✗ FAILED", "malformed": "✗ FAILED"}
+        for i, (src, ref, cov) in enumerate(todo, 1):
+            fn = dispatch_fn or dispatch.DISPATCHERS.get(src.name, dispatch.author)
+            name = _display_name(src, ref, cwd)
+            what = "continuing" if cov is not None and record.find_record(records_dir, ref) else "writing"
+            with progress.Spinner(f"{what} {i}/{len(todo)} · {src.name} · {name}"):
+                r = backfill_one(src, ref, records_dir, project, prompt,
+                                 src.scribe_models(ref, cwd), fn, cwd, covered=cov)
+            progress.note(f"  {_VERB.get(r['status'], r['status'])} {name}")
+            r["provider"] = src.name
+            outcomes.append(r)
+            total_cost += r.get("cost", 0.0)
+            if r["status"] in ("ok", "updated"):
+                wrote += 1
+        if any(o["status"] in ("ok", "updated", "no-record") for o in outcomes):
+            record.rebuild_index(records_dir)
+        # ALWAYS report, even when nothing was written: a run that checked sessions and
+        # declined them all must not look the same as a run that never happened (#5).
+        out.write(_summary_line(outcomes, total_cost) + "\n")
+        for o in outcomes:
+            if o["status"] in ("dispatch-error", "malformed"):
+                out.write(f"automemory:   {o['status']} {o.get('provider', '')}:{o['uuid']}"
+                          f"{' — ' + o['error'].strip()[:200] if o.get('error') else ''}\n")
+        if deferred:
+            out.write(f"automemory: {len(deferred)} older session(s) pending — "
+                      f"run `automemory process` to catch up.\n")
 
-    # 4. mirror the agent's own memory. Claude Code only (opencode has no such dir),
-    # but keyed on the STORE, not on which provider won detection — a project that
-    # also has opencode sessions still has a Claude memory dir to mirror.
-    # Runs every time: memory can change without any new session.
-    mem = memory_mirror.MirrorResult()
-    cc = next((s for s in sources if isinstance(s, _ClaudeCodeSource)), None)
-    if cc is None and not pinned:
-        cc = _ClaudeCodeSource(projects_root=claude_projects_root)
-    if cc is not None:
-        mem = memory_mirror.sync(
-            memory_mirror.memory_dir_for(cc.projects_root, _slug_for_cwd(cwd)),
-            memory_mirror.mirror_dir_for(records_dir))
-        if mem.touched():
-            bits = [f"{n} {w}" for n, w in
-                    ((mem.new, "new"), (mem.superseded, "superseded"), (mem.retired, "retired")) if n]
-            out.write(f"automemory: mirrored memory ({', '.join(bits)}).\n")
+        # 4. mirror the agent's own memory. Claude Code only (opencode has no such dir),
+        # but keyed on the STORE, not on which provider won detection — a project that
+        # also has opencode sessions still has a Claude memory dir to mirror.
+        # Runs every time: memory can change without any new session.
+        mem = memory_mirror.MirrorResult()
+        cc = next((s for s in sources if isinstance(s, _ClaudeCodeSource)), None)
+        if cc is None and not pinned:
+            cc = _ClaudeCodeSource(projects_root=claude_projects_root)
+        if cc is not None:
+            mem = memory_mirror.sync(
+                memory_mirror.memory_dir_for(cc.projects_root, _slug_for_cwd(cwd)),
+                memory_mirror.mirror_dir_for(records_dir))
+            if mem.touched():
+                bits = [f"{n} {w}" for n, w in
+                        ((mem.new, "new"), (mem.superseded, "superseded"), (mem.retired, "retired")) if n]
+                out.write(f"automemory: mirrored memory ({', '.join(bits)}).\n")
 
-    return {"providers": [s.name for s in sources], "missing": len(missing),
-            "processed": len(todo), "wrote": wrote, "deferred": len(deferred),
-            "cost": total_cost, "outcomes": outcomes,
-            "memory": {"new": mem.new, "superseded": mem.superseded,
-                       "retired": mem.retired, "unchanged": mem.unchanged,
-                       "skipped": mem.skipped}}
+        return {"providers": [s.name for s in sources], "missing": len(missing),
+                "processed": len(todo), "wrote": wrote, "deferred": len(deferred),
+                "cost": total_cost, "outcomes": outcomes,
+                "memory": {"new": mem.new, "superseded": mem.superseded,
+                           "retired": mem.retired, "unchanged": mem.unchanged,
+                           "skipped": mem.skipped}}
+    finally:
+        lock.__exit__()
 
 
-def main() -> int:
-    # A hook pipes a JSON payload in. A person typing `automemory reconcile` has a
-    # keyboard on stdin — reading it would hang until Ctrl-D (hence the old
-    # `</dev/null` workaround). No payload = no live session to exclude, which is
-    # exactly the manual "capture everything, including now" behaviour.
-    # Stdin can also be a pipe that is open but never written or closed (an IDE
-    # task, cron, CI, an agent's shell) — read() would wait forever (measured
-    # 2026-10-30: a run hung 5+ min). A hook writes its payload at once, so wait
-    # briefly for data and treat silence as "no payload".
-    payload = {}
-    if sys.stdin is not None and not sys.stdin.isatty():
-        import select
-        try:
-            ready, _, _ = select.select([sys.stdin], [], [], 3.0)
-        except (OSError, ValueError):
-            ready = [sys.stdin]  # not selectable (e.g. a file): just read it
-        if ready:
-            try:
-                payload = json.loads(sys.stdin.read() or "{}")
-            except json.JSONDecodeError:
-                payload = {}
-    run(payload)
+def read_payload() -> dict:
+    """A hook's JSON payload from stdin, or {} for a person / a silent pipe.
+
+    A person at a terminal has a keyboard on stdin; an IDE task, cron, CI or an
+    agent's shell can leave a pipe open and silent (measured 2026-10-30: read()
+    hung 5+ min). A hook writes its payload at once, so wait briefly and treat
+    silence as "no payload" — the manual capture-everything run."""
+    if sys.stdin is None or sys.stdin.isatty():
+        return {}
+    import select
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], 3.0)
+    except (OSError, ValueError):
+        ready = [sys.stdin]  # not selectable (e.g. a file): just read it
+    if not ready:
+        return {}
+    try:
+        return json.loads(sys.stdin.read() or "{}")
+    except json.JSONDecodeError:
+        return {}
+
+
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    run(read_payload(), handover="--background" not in argv)
     return 0
 
 

@@ -47,6 +47,11 @@
  *   would re-trigger this hook forever. dispatch sets AUTOMEMORY_SCRIBE=1 in the
  *   child's env; we return immediately when we see it. Explicit beats heuristic.
  *
+ * - CONTEXT, NOT A CHORE. handover-in shows the session map only. The old "write
+ *   your own record at a natural checkpoint" fast path was retired 2026-10-30
+ *   (undefined, uncheckable, bypassed the record format); the scribe is the only
+ *   author.
+ *
  * - FIRST PROMPT ONLY, not every prompt. `prompt` fires on every turn. Running
  *   the reconciler each time would cost money continuously. We reconcile once
  *   per session, which is also what "handover-in" means.
@@ -175,12 +180,6 @@ export default {
           "<automemory>",
           "Session map for this project (derived, newest first):",
           map,
-          "",
-          "At a natural checkpoint, write or refresh this session's record into",
-          "agent-records/: `## Done` required — a concrete durable state-change",
-          "that a future session would need. If there isn't one, skip the record",
-          "entirely. Optional `## Learnings & Gotchas` / `## Outstanding`.",
-          "Facts about what happened, not a summary of the conversation.",
           "</automemory>",
         ].join("\n")
 

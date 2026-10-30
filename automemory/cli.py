@@ -28,40 +28,52 @@ from pathlib import Path
 
 from . import providers, record, reconcile
 
-# The shipped console entrypoint (brew/pip installs `automemory` on PATH).
-HOOK_COMMAND = "automemory reconcile"
+# Claude Code hooks: the same command on both events. It returns at once; the
+# catch-up runs detached in the background (a startup hook that ran the scribe in
+# the foreground would hold the session for minutes).
+HOOK_EVENTS = ("SessionStart", "SessionEnd")
+HOOK_SUBCOMMAND = "hook"
 
 
-# --- cores (testable) ---------------------------------------------------------
+def hook_command_for(project: Path = None) -> str:
+    """Absolute engine path + `hook`: a Claude Code started with a different PATH
+    (GUI launch, stale environment) can't break it — the opencode lesson."""
+    return " ".join(engine_command()) + " " + HOOK_SUBCOMMAND
 
 
-def hook_command_for(project: Path) -> str:
-    return HOOK_COMMAND
+HOOK_COMMAND = "automemory hook"  # display / legacy name
 
 
-def is_wired(settings_path: Path, command: str) -> bool:
+def _is_ours(command: str) -> bool:
+    c = (command or "").strip()
+    return c.endswith("automemory reconcile") or c.endswith("automemory hook") \
+        or c.endswith("-m automemory hook") or c.endswith("-m automemory reconcile")
+
+
+def is_wired(settings_path: Path, command: str = None) -> bool:
+    """True if every hook event carries one of OUR commands (any form)."""
     if not settings_path.exists():
         return False
     try:
         data = json.loads(settings_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return False
-    for entry in data.get("hooks", {}).get("SessionStart", []):
-        if isinstance(entry, dict):
-            for h in entry.get("hooks", []):
-                if isinstance(h, dict) and h.get("command") == command:
-                    return True
-    return False
+    hooks = data.get("hooks", {}) if isinstance(data, dict) else {}
+    for event in HOOK_EVENTS:
+        cmds = [h.get("command", "") for e in hooks.get(event, []) if isinstance(e, dict)
+                for h in e.get("hooks", []) if isinstance(h, dict)]
+        if not any((command and c == command) or (not command and _is_ours(c)) for c in cmds):
+            return False
+    return True
 
 
 def wire_hook(project: Path, command: str) -> str:
-    """Merge our SessionStart hook into .claude/settings.json without clobbering.
-    Returns a status string. Aborts (raises ValueError) if the file exists but is
-    not valid JSON — never overwrite a hand-edited-but-broken file."""
+    """Merge our hooks into .claude/settings.json without clobbering anything else.
+    Our own older entries (`automemory reconcile`, a different engine path) are
+    REPLACED, not duplicated. Returns 'wired' | 'updated' | 'already-wired'.
+    Raises ValueError if the file exists but isn't a valid JSON object — a
+    hand-edited-but-broken file is never overwritten."""
     settings = project / ".claude" / "settings.json"
-    if is_wired(settings, command):
-        return "already-wired"
-
     data = {}
     if settings.exists():
         try:
@@ -70,14 +82,30 @@ def wire_hook(project: Path, command: str) -> str:
             raise ValueError(f"{settings} is not valid JSON — refusing to touch it ({e})")
         if not isinstance(data, dict):
             raise ValueError(f"{settings} is not a JSON object — refusing to touch it")
+    if is_wired(settings, command):
+        return "already-wired"
 
     hooks = data.setdefault("hooks", {})
-    session_start = hooks.setdefault("SessionStart", [])
-    session_start.append({"hooks": [{"type": "command", "command": command}]})
+    replaced = False
+    for event in HOOK_EVENTS:
+        entries = hooks.setdefault(event, [])
+        kept = []
+        for e in entries:
+            if isinstance(e, dict):
+                hs = [h for h in e.get("hooks", [])
+                      if not (isinstance(h, dict) and _is_ours(h.get("command", "")))]
+                if len(hs) != len(e.get("hooks", [])):
+                    replaced = True
+                if hs:
+                    kept.append(dict(e, hooks=hs))
+            else:
+                kept.append(e)
+        kept.append({"hooks": [{"type": "command", "command": command}]})
+        hooks[event] = kept
 
     settings.parent.mkdir(parents=True, exist_ok=True)
     settings.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    return "wired"
+    return "updated" if replaced else "wired"
 
 
 def scaffold_records(project: Path) -> Path:
@@ -99,7 +127,7 @@ def status_of(project: Path, records_dir: Path = None) -> dict:
         "project": project.name,
         "records": len(md),
         "latest": latest,
-        "wired": is_wired(project / ".claude" / "settings.json", HOOK_COMMAND),
+        "wired": is_wired(project / ".claude" / "settings.json"),
     }
 
 
@@ -161,9 +189,10 @@ def cmd_init(_args) -> int:
             print(f"automemory init: ERROR — {e}", file=sys.stderr)
             return 1
         if result == "already-wired":
-            print("automemory: SessionStart hook already wired (no change).")
+            print("automemory: Claude Code hooks already wired (no change).")
         else:
-            print(f"automemory: wired SessionStart hook -> {HOOK_COMMAND}")
+            print(f"automemory: {result} Claude Code start + end hooks -> "
+                  f"{hook_command_for(project)} (catch-up runs in the background)")
     else:
         # opencode has no hook file. Wiring a .claude/settings.json here would
         # report success and do nothing — the trigger is the global plugin, and
@@ -283,8 +312,57 @@ def cmd_migrate(_args) -> int:
     return 0
 
 
-def cmd_reconcile(_args) -> int:
-    return reconcile.main()
+def cmd_reconcile(args) -> int:
+    return reconcile.main(["--background"] if getattr(args, "background", False) else [])
+
+
+def cmd_hook(_args) -> int:
+    """Claude Code hook entry. Returns immediately; never blocks the session.
+
+    SessionStart: print the map for the agent's context, then start the
+    catch-up in the background (the live session is excluded — it's starting).
+    SessionEnd: start a background run that INCLUDES the ending session, so the
+    last session in a project no longer needs a manual `amlog`."""
+    payload = reconcile.read_payload()
+    cwd = payload.get("cwd") or os.getcwd()
+    event = payload.get("hook_event_name", "SessionStart")
+    if event == "SessionStart":
+        sys.stdout.write(reconcile.handover_text(reconcile.records_dir_for(cwd)))
+        sys.stdout.flush()
+    bg = dict(payload)
+    if event == "SessionEnd":
+        bg.pop("session_id", None)  # the ended session is complete: capture it too
+    spawn_background(bg, cwd)
+    return 0
+
+
+RECONCILE_LOG = Path.home() / ".local" / "state" / "automemory" / "reconcile.log"
+
+
+def spawn_background(payload: dict, cwd: str) -> None:
+    """Run `reconcile --background` detached: own session (survives the hook
+    returning), output appended to reconcile.log. Never raises."""
+    import subprocess
+    from datetime import datetime, timezone
+    try:
+        RECONCILE_LOG.parent.mkdir(parents=True, exist_ok=True)
+        log = open(RECONCILE_LOG, "a", encoding="utf-8")
+        log.write(f"\n=== {datetime.now(timezone.utc).isoformat(timespec='seconds')} "
+                  f"{payload.get('hook_event_name', 'run')} "
+                  f"session={payload.get('session_id', '-')} dir={cwd}\n")
+        log.flush()
+        p = subprocess.Popen(engine_command() + ["reconcile", "--background"],
+                             cwd=cwd, stdin=subprocess.PIPE, stdout=log, stderr=log,
+                             start_new_session=True)
+        p.stdin.write(json.dumps(payload).encode())
+        p.stdin.close()
+        log.close()
+    except Exception as e:  # a hook must never fail the session
+        try:
+            with open(RECONCILE_LOG, "a", encoding="utf-8") as fh:
+                fh.write(f"automemory: background start failed: {e}\n")
+        except OSError:
+            pass
 
 
 # --- consent (opencode adapter) -----------------------------------------------
@@ -417,11 +495,13 @@ def main(argv=None) -> int:
     p_di = sub.add_parser("disable", help="stop recording a project")
     p_di.add_argument("path", nargs="?", help="project dir (default: cwd)")
     sub.add_parser("projects", help="list projects and their recording state")
-    sub.add_parser("reconcile", help=argparse.SUPPRESS)  # internal hook entrypoint
+    p_rc = sub.add_parser("reconcile", help="record every session with new turns (amlog)")
+    p_rc.add_argument("--background", action="store_true", help=argparse.SUPPRESS)
+    sub.add_parser("hook", help=argparse.SUPPRESS)  # Claude Code hook entrypoint
     args = p.parse_args(argv)
     return {
         "init": cmd_init, "status": cmd_status, "peep": cmd_peep, "reconcile": cmd_reconcile,
-        "migrate": cmd_migrate,
+        "migrate": cmd_migrate, "hook": cmd_hook,
         "enable": cmd_enable, "disable": cmd_disable, "projects": cmd_projects,
     }[args.cmd](args)
 
