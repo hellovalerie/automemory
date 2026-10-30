@@ -284,7 +284,10 @@ def cmd_migrate(_args) -> int:
         ref = record._fm_parse(p.read_text(encoding="utf-8"))["source"].partition(":")[2]
         return (p.stem.rsplit("-", 1)[-1] != record.short(ref), p.name)
     legacy.sort(key=_order)
-    if not legacy:
+    reorder = [p for p in recs.glob("*.md") if p.name != record.INDEX_NAME
+               and record.is_record(record._fm_parse(p.read_text(encoding="utf-8")))
+               and record.updates_out_of_order(record._split(p.read_text(encoding="utf-8"))[1])]
+    if not legacy and not reorder:
         print("automemory migrate: nothing to migrate.")
         return 0
     snap = record.snapshot(recs, label=cwd.name)
@@ -310,8 +313,13 @@ def cmd_migrate(_args) -> int:
             custom_title=meta.get("custom_title", ""),
             model=meta.get("model", ""), turns=turns)
         print(f"  {p.name} -> {new.name}  (turns {turns})")
+    for p in recs.glob("*.md"):
+        if p.name != record.INDEX_NAME and record.is_record(record._fm_parse(p.read_text(encoding="utf-8"))) \
+                and record.reorder_updates(p):
+            print(f"  {p.name}: updates moved to the top, newest first")
     record.rebuild_index(recs)
-    print(f"automemory migrate: {len(legacy)} record(s) migrated; INDEX rebuilt. "
+    print(f"automemory migrate: {len(legacy)} legacy record(s) converted, "
+          f"{len(reorder)} reordered; INDEX rebuilt. "
           f"Snapshot kept at {snap}")
     return 0
 

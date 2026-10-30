@@ -326,7 +326,8 @@ def append_update(path, *, turns_from: int, turns_to: int, title: str,
     if done and done.strip():
         header = f"## Update — {date} · turns {turns_from}–{turns_to}"
         block = "\n".join([header, "", *_sections(done, learnings, outstanding, "###")])
-        body = _insert_before_tail(body, block)
+        # Freshest first: a new update goes straight under the frontmatter.
+        body = "\n" + block.rstrip("\n") + "\n\n" + body.lstrip("\n")
 
     changes = []
     if title and title != fm.get("title"):
@@ -415,6 +416,49 @@ def migrate_legacy(path, *, provider_tag: str, session_ref: str, title: str,
     if want != path.name:
         path = _guarded_rename(path, path.parent / want)
     return path
+
+
+_UPDATE = re.compile(r"^## Update — .*turns (\d+)")
+
+
+def _top_sections(body: str) -> list:
+    """Split a body at its `## ` headings: [preamble, section, section, …]."""
+    return re.split(r"(?m)^(?=## )", body)
+
+
+def _non_blank(text: str) -> list:
+    return sorted(l for l in text.splitlines() if l.strip())
+
+
+def updates_out_of_order(body: str) -> bool:
+    """True if `## Update — …` blocks aren't already first, newest first."""
+    secs = [s for s in _top_sections(body) if s.strip()]
+    tags = [_UPDATE.match(s) for s in secs]
+    n = sum(1 for t in tags if t)
+    turns = [int(t.group(1)) for t in tags[:n] if t]
+    return n > 0 and (len(turns) != n or turns != sorted(turns, reverse=True))
+
+
+def reorder_updates(path, date: str = "") -> bool:
+    """Move a record's `## Update — …` blocks to the top, newest first. Runs only
+    from `automemory migrate`, after its verified snapshot: moving text is what
+    `_guarded_write` forbids, so this has its own check — every non-blank line
+    must survive, only the order may change. Returns True if it moved anything."""
+    path = Path(path)
+    date = date or today()
+    fm, body = _split(path.read_text(encoding="utf-8"))
+    if not updates_out_of_order(body):
+        return False
+    secs = [s for s in _top_sections(body) if s.strip()]
+    ups = [s for s in secs if _UPDATE.match(s)]
+    rest = [s for s in secs if not _UPDATE.match(s)]
+    ups.sort(key=lambda s: int(_UPDATE.match(s).group(1)), reverse=True)
+    new = "\n" + "\n".join(s.strip("\n") + "\n" for s in ups + rest)
+    if _non_blank(new) != _non_blank(body):
+        raise AppendOnlyViolation(f"reorder would change content in {path}")
+    new = _add_changes(new, [f"{date} · format: updates moved to the top, newest first"])
+    path.write_text(_fm_dump(fm) + "\n" + new, encoding="utf-8")
+    return True
 
 
 # --- INDEX (derived view — rebuilt from frontmatter, never hand-edited) -------
