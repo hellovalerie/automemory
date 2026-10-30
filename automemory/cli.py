@@ -32,6 +32,7 @@ from . import providers, record, reconcile
 # catch-up runs detached in the background (a startup hook that ran the scribe in
 # the foreground would hold the session for minutes).
 HOOK_EVENTS = ("SessionStart", "SessionEnd")
+SETTINGS_FILE = "settings.local.json"
 HOOK_SUBCOMMAND = "hook"
 
 
@@ -68,12 +69,15 @@ def is_wired(settings_path: Path, command: str = None) -> bool:
 
 
 def wire_hook(project: Path, command: str) -> str:
-    """Merge our hooks into .claude/settings.json without clobbering anything else.
+    """Merge our hooks into .claude/settings.local.json without clobbering anything else.
     Our own older entries (`automemory reconcile`, a different engine path) are
     REPLACED, not duplicated. Returns 'wired' | 'updated' | 'already-wired'.
     Raises ValueError if the file exists but isn't a valid JSON object — a
     hand-edited-but-broken file is never overwritten."""
-    settings = project / ".claude" / "settings.json"
+    # settings.LOCAL.json: personal and uncommitted. The hook carries this
+    # machine's absolute engine path, which must not land in a shared,
+    # committed settings.json where it would break for every teammate.
+    settings = project / ".claude" / SETTINGS_FILE
     data = {}
     if settings.exists():
         try:
@@ -127,7 +131,7 @@ def status_of(project: Path, records_dir: Path = None) -> dict:
         "project": project.name,
         "records": len(md),
         "latest": latest,
-        "wired": is_wired(project / ".claude" / "settings.json"),
+        "wired": is_wired(project / ".claude" / SETTINGS_FILE),
     }
 
 
