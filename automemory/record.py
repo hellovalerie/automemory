@@ -352,6 +352,30 @@ def append_update(path, *, turns_from: int, turns_to: int, title: str,
     return path
 
 
+# --- snapshot (`protect`): a read-only copy before any format change ----------
+
+
+def snapshot(records_dir, label: str = "") -> Path:
+    """Copy the whole records dir to ~/.local/share/automemory/snapshots/<ts>/,
+    OUTSIDE the project (never committed, never rinsed), and verify the copy
+    byte-for-byte before returning. Raises if the copy doesn't match."""
+    import filecmp
+    import shutil
+    records_dir = Path(records_dir)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    import os
+    base = Path(os.environ.get("AUTOMEMORY_SNAPSHOT_DIR")
+                or (Path.home() / ".local" / "share" / "automemory" / "snapshots"))
+    dest = base / f"{stamp}-{slug(label or records_dir.parent.name)}"
+    shutil.copytree(records_dir, dest)
+    for src in records_dir.rglob("*"):
+        if src.is_file():
+            twin = dest / src.relative_to(records_dir)
+            if not (twin.is_file() and filecmp.cmp(src, twin, shallow=False)):
+                raise RuntimeError(f"snapshot mismatch at {src}; nothing migrated")
+    return dest
+
+
 # --- migration of pre-2026-10-30 records ----------------------------------------
 
 
@@ -380,6 +404,10 @@ def migrate_legacy(path, *, provider_tag: str, session_ref: str, title: str,
         new["model"] = model
     want = filename_for(path.parent, started=started, provider_tag=provider_tag,
                         session_ref=session_ref, custom_title=custom_title)
+    if want != path.name and (path.parent / want).exists():
+        # Legacy duplicate: two old records for ONE session. Keep both (nothing is
+        # deleted); the second keeps its old trailing token to stay distinct.
+        want = want[:-3] + "-" + path.stem.rsplit("-", 1)[-1] + ".md"
     if want != path.name:
         changes.append(f"{date} · filename: {path.name} → {want}")
     body = _add_changes(body, changes)

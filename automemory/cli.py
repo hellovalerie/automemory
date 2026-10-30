@@ -212,6 +212,77 @@ def cmd_peep(_args) -> int:
     return 0
 
 
+def _turns_at(source, ref: str, cwd: str, until_iso: str) -> int:
+    """Turns a legacy record covered: for Claude Code, the turns up to its
+    `captured` time (the session may have continued since); otherwise all."""
+    if isinstance(source, reconcile._ClaudeCodeSource) and until_iso:
+        import tempfile
+        src = source._path(ref, cwd)
+        try:
+            kept = [l for l in src.read_text(encoding="utf-8", errors="replace").splitlines()
+                    if (json.loads(l).get("timestamp") or "") <= until_iso]
+        except (OSError, ValueError):
+            kept = None
+        if kept is not None:
+            with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as fh:
+                fh.write("\n".join(kept) + "\n")
+            try:
+                from . import transcript
+                return len(reconcile.split_turns(transcript.render_file(Path(fh.name))))
+            finally:
+                Path(fh.name).unlink(missing_ok=True)
+    try:
+        return len(reconcile.split_turns(source.render(ref, cwd)))
+    except Exception:
+        return 0  # transcript gone: turns unknown — never a half-migrated folder
+
+
+def cmd_migrate(_args) -> int:
+    """Convert pre-2026-10-30 records to the current format, after a verified
+    snapshot. Prints a receipt of every file touched."""
+    cwd = Path.cwd()
+    recs = reconcile.records_dir_for(str(cwd))
+    legacy = [p for p in recs.glob("*.md")
+              if p.name != record.INDEX_NAME
+              and record.is_legacy(record._fm_parse(p.read_text(encoding="utf-8")))]
+    # Legacy duplicates (two old records for one session): the one whose old name
+    # already carries the session's short id goes first and keeps the plain name.
+    def _order(p):
+        ref = record._fm_parse(p.read_text(encoding="utf-8"))["source"].partition(":")[2]
+        return (p.stem.rsplit("-", 1)[-1] != record.short(ref), p.name)
+    legacy.sort(key=_order)
+    if not legacy:
+        print("automemory migrate: nothing to migrate.")
+        return 0
+    snap = record.snapshot(recs, label=cwd.name)
+    print(f"automemory migrate: snapshot (verified) -> {snap}")
+    srcs = {"claude-code": reconcile._ClaudeCodeSource(), "opencode": reconcile._OpencodeSource()}
+    for p in legacy:
+        fm = record._fm_parse(p.read_text(encoding="utf-8"))
+        prov, _, ref = fm["source"].partition(":")
+        src = srcs.get(prov)
+        tag = providers.resolve(prov).file_tag or prov
+        # Fresh metadata only when the transcript still exists — a missing one
+        # would yield placeholder values and "change" a correct title.
+        meta = {}
+        if src is not None and ref in src.list_ids(str(cwd)):
+            try:
+                meta = src.meta(ref, str(cwd))
+            except Exception:
+                meta = {}
+        turns = _turns_at(src, ref, str(cwd), fm.get("captured", "")) if src else 0
+        new = record.migrate_legacy(
+            p, provider_tag=tag, session_ref=ref,
+            title=meta.get("title") or fm.get("title", ""),
+            custom_title=meta.get("custom_title", ""),
+            model=meta.get("model", ""), turns=turns)
+        print(f"  {p.name} -> {new.name}  (turns {turns})")
+    record.rebuild_index(recs)
+    print(f"automemory migrate: {len(legacy)} record(s) migrated; INDEX rebuilt. "
+          f"Snapshot kept at {snap}")
+    return 0
+
+
 def cmd_reconcile(_args) -> int:
     return reconcile.main()
 
@@ -337,6 +408,7 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="automemory", description="passive capture engine for AI conversations")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("init", help="wire the SessionStart hook + scaffold agent-records/")
+    sub.add_parser("migrate", help="convert old-format records (snapshots them first)")
     sub.add_parser("status", help="record count, latest, hook state")
     sub.add_parser("peep", help="print the record index (titles)")
     p_en = sub.add_parser("enable", help="record sessions for this project (opencode adapter)")
@@ -349,6 +421,7 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
     return {
         "init": cmd_init, "status": cmd_status, "peep": cmd_peep, "reconcile": cmd_reconcile,
+        "migrate": cmd_migrate,
         "enable": cmd_enable, "disable": cmd_disable, "projects": cmd_projects,
     }[args.cmd](args)
 
