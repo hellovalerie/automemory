@@ -497,6 +497,28 @@ def opencode_session_meta(session_id, db=None) -> dict:
     return {"occurred": occurred or "0000-00-00", "title": title[:120], "model": model}
 
 
+def opencode_session_last_active(session_id: str, db=None) -> str:
+    """YYYY-MM-DD of the session's last update, or ""."""
+    import datetime as _dt
+    try:
+        con = _oc_connect(db)
+    except sqlite3.Error:
+        return ""
+    try:
+        for table in ("session_v2", "session"):
+            if _has_table(con, table):
+                row = con.execute(f"select time_updated from {table} where id = ?",
+                                  (session_id,)).fetchone()
+                if row and row[0]:
+                    return _dt.datetime.fromtimestamp(
+                        row[0] / 1000, _dt.timezone.utc).strftime("%Y-%m-%d")
+        return ""
+    except sqlite3.Error:
+        return ""
+    finally:
+        con.close()
+
+
 def opencode_latest_model_ref(db=None) -> str:
     """The model the user ran most recently ANYWHERE in opencode — their current
     choice, which follows them when they switch. `provider/model`, or ""."""

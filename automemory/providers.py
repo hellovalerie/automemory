@@ -79,10 +79,13 @@ class Provider:
     store_kind: str
 
     notes: str = ""
+    #: short provider label used in record filenames (`2026-10-29-claude-…`)
+    file_tag: str = ""
 
 
 CLAUDE_CODE = Provider(
     name="claude-code",
+    file_tag="claude",
     aliases=("claude", "claude_code", "cc"),
     cli="claude",
     # An ALIAS, not a version: Claude Code resolves "haiku" to the current
@@ -100,6 +103,7 @@ CLAUDE_CODE = Provider(
 
 OPENCODE = Provider(
     name="opencode",
+    file_tag="opencode",
     aliases=("open-code", "oc"),
     cli="opencode",
     # None = whatever model the user's opencode is currently set to. Never a

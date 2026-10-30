@@ -92,7 +92,7 @@ def status_of(project: Path, records_dir: Path = None) -> dict:
     # Count only real records — anything with a record envelope. A README.md
     # sitting in agent-records/ is documentation, not a session record.
     md = [p for p in recs.glob("*.md")
-          if p.name != "INDEX.md" and record._fm_parse(p.read_text(encoding="utf-8")).get("id")] \
+          if p.name != "INDEX.md" and record.is_record(record._fm_parse(p.read_text(encoding="utf-8")))] \
         if recs.is_dir() else []
     latest = max(md, key=lambda p: p.stat().st_mtime).name if md else None
     return {

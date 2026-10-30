@@ -101,11 +101,10 @@ def _transcript_meta(path: Path) -> dict:
                     custom = got
                 elif got:
                     ai = got
-            if not model:
-                m = r.get("message")
-                cand = (m.get("model") if isinstance(m, dict) else None) or r.get("model")
-                if cand:
-                    model = cand
+            m = r.get("message")
+            cand = (m.get("model") if isinstance(m, dict) else None) or r.get("model")
+            if cand and not str(cand).startswith("<"):  # skip "<synthetic>"
+                model = cand  # LAST used wins: the frontmatter shows current state
             if not first_prompt and t == "user":
                 m = r.get("message")
                 c = m.get("content") if isinstance(m, dict) else None
@@ -114,10 +113,12 @@ def _transcript_meta(path: Path) -> dict:
     except OSError:
         pass
     occurred = min(tss)[:10] if tss else "0000-00-00"
+    last_active = max(tss)[:10] if tss else occurred
     title = custom or ai
     if not title:
         title = " ".join(first_prompt.split()[:8]) or f"session {path.stem[:8]}"
-    return {"occurred": occurred, "title": title[:120], "model": model}
+    return {"occurred": occurred, "last_active": last_active, "title": title[:120],
+            "custom_title": custom[:120], "model": model}
 
 
 # --- provider adapters ---------------------------------------------------------
@@ -242,7 +243,16 @@ class _OpencodeSource(_Source):
         return transcript.render_opencode_session(ref, db=self.db)
 
     def meta(self, ref: str, cwd: str = None) -> dict:
-        return transcript.opencode_session_meta(ref, db=self.db)
+        m = dict(transcript.opencode_session_meta(ref, db=self.db))
+        last = transcript.opencode_session_model_ref(ref, db=self.db)
+        if last:
+            m["model"] = last.split("/", 1)[-1]  # last used, not most frequent
+        m["last_active"] = (transcript.opencode_session_last_active(ref, db=self.db)
+                            or m.get("occurred", ""))
+        # opencode's session title can't be told apart from a user rename, so the
+        # filename falls back to the session id (custom_title stays empty).
+        m.setdefault("custom_title", "")
+        return m
 
     def scribe_models(self, ref: str, cwd: str = None) -> list:
         """User's configured model, then the model the session itself ran on,
@@ -354,29 +364,53 @@ def _interleave(lists: list) -> list:
 # --- core (testable) ----------------------------------------------------------
 
 
-def find_missing(source: _Source, records_dir: Path, cwd: str, current_session: str):
-    """Session refs with a transcript but no record yet (excluding the live
-    session and the engine's own scribe sessions), newest-first. Idempotency
-    key is the session ref.
+def split_turns(text: str) -> list:
+    """Rendered transcript -> one chunk per user turn (`### user` + what follows).
+    Anything before the first user turn rides with the first chunk. A turn is one
+    message from the person; that count is the record's progress marker."""
+    parts = re.split(r"(?m)^(?=### user\s*$)", text or "")
+    chunks = [p for p in parts if p.strip()]
+    if len(chunks) > 1 and not chunks[0].lstrip().startswith("### user"):
+        chunks[1] = chunks[0] + chunks[1]
+        chunks = chunks[1:]
+    return chunks
 
-    Empty sessions are dropped HERE, before the cap is applied — not left for
-    backfill_one to reject. Measured 2026-10-17: of 51 missing sessions in this
-    project, the five most-recently-active were all empty or single-line probe
-    runs, so the cap of 5 was spent entirely on sessions that could only ever
-    return "empty" and real work was never reached.
+
+def find_pending(source: _Source, records_dir: Path, cwd: str, current_session: str):
+    """Sessions with turns nobody has looked at yet, newest-first, as
+    (ref, covered) — covered = turns already handled (by a record or a decline),
+    None if the session was never seen.
+
+    A session is pending when it has no record/decline and has content, OR it has
+    grown past what was covered (resumed/continued). Empty sessions are dropped
+    here, before the cap, so they can't eat it (measured 2026-10-17).
     """
     out = []
     for ref in source.list_ids(cwd):
-        if ref == current_session:
+        if ref == current_session or source.is_scribe(ref, cwd):
             continue
-        if source.is_scribe(ref, cwd):
+        covered = record.covered_turns(records_dir, ref)
+        if covered is None:
+            if source.has_content(ref, cwd):
+                out.append((ref, None))
             continue
-        if not source.has_content(ref, cwd):
-            continue
-        if record.record_exists_for_session(records_dir, ref):
-            continue
-        out.append(ref)
+        if len(split_turns(source.render(ref, cwd))) > covered:
+            out.append((ref, covered))
     return out
+
+
+def find_missing(source: _Source, records_dir: Path, cwd: str, current_session: str):
+    """Back-compat: refs only."""
+    return [ref for ref, _ in find_pending(source, records_dir, cwd, current_session)]
+
+
+_CONTINUE = (
+    "\n\nThis session ALREADY HAS a record (below, between BEGIN/END RECORD). "
+    "Write ONLY what is new in the transcript you are given — the new turns since "
+    "that record. Do not repeat anything the record already says. Same sections, "
+    "same write-gate: if the new turns produced nothing durable, output exactly "
+    "NO-RECORD."
+)
 
 
 _MODEL_GONE = ("model is unavailable", "model unavailable", "no-route",
@@ -398,26 +432,43 @@ def _dispatch_first_working(dispatch_fn, text: str, prompt: str, models: list):
 
 
 def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
-                 prompt: str, model, dispatch_fn, cwd: str = None):
-    """Render -> redact -> author (1 retry on malformed) -> write. Returns an
-    outcome dict; never raises."""
-    text = source.render(ref, cwd)
-    if not text.strip():
+                 prompt: str, model, dispatch_fn, cwd: str = None, covered=None):
+    """One session: render -> slice to the turns not yet covered -> redact ->
+    author (1 retry on malformed) -> create the record, or continue it in place,
+    or remember the decline. Returns an outcome dict; never raises.
+
+    covered=None  : never seen -> the whole transcript; a record is created.
+    covered=N     : turns 1..N already handled -> only turns N+1.. are sent. If a
+                    record exists it is CONTINUED (`## Update`), never rewritten;
+                    if N came from a decline, the whole transcript is re-read
+                    (the earlier part had nothing alone, but may give context).
+    """
+    full = source.render(ref, cwd)
+    turns = split_turns(full)
+    total = len(turns)
+    if not full.strip() or total == 0:
         return {"uuid": ref, "status": "empty", "cost": 0.0}
+    existing = record.find_record(records_dir, ref) if covered is not None else None
+
+    if existing is not None:
+        _, prior = record._split(existing.read_text(encoding="utf-8"))
+        text = "".join(turns[covered:])
+        instruction = prompt + _CONTINUE + f"\n\n--- BEGIN RECORD ---\n{prior.strip()}\n--- END RECORD ---"
+    else:
+        text, instruction = full, prompt
     scrubbed, _ = redact.redact(text)
 
     result = None
     # Two distinct retries, because two distinct failures:
     #  - malformed output from the scribe (weak-model stochasticity)
     #  - a DISPATCH error, which is often transient. Observed 2026-10-15: the
-    #    opencode free tier 403s intermittently under repeated calls — the same
-    #    payload succeeded on one run and failed the next four. A provider that
-    #    drops the occasional request shouldn't cost the session its record.
-    # "not found" and malformed-binary errors are permanent; don't hammer those.
+    #    opencode free tier 403s intermittently under repeated calls.
+    # Permanent errors (missing CLI, unavailable model) aren't retried.
     _PERMANENT = ("not found", "no such file", "unavailable", "invalid model")
     dispatch_tries, max_dispatch_tries = 0, 3
     models = model if isinstance(model, list) else [model]
-    call = lambda: _dispatch_first_working(dispatch_fn, scrubbed, prompt, models)
+    call = lambda: _dispatch_first_working(dispatch_fn, scrubbed, instruction, models)
+    verdict = "bad"
     for _ in (1, 2):  # author, retry once on malformed
         result = call()
         while result.is_error and dispatch_tries < max_dispatch_tries:
@@ -430,23 +481,39 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
             return {"uuid": ref, "status": "dispatch-error", "error": result.error,
                     "cost": result.cost_usd}
         verdict = _valid_or_norecord(result.text)
-        if verdict == "norecord":
-            return {"uuid": ref, "status": "no-record", "cost": result.cost_usd}
-        if verdict == "ok":
+        if verdict in ("norecord", "ok"):
             break
-    if _valid_or_norecord(result.text) != "ok":
+    if verdict == "bad":
         return {"uuid": ref, "status": "malformed", "cost": result.cost_usd}
 
     meta = source.meta(ref, cwd)
-    secs = _split_sections(result.text)
+    tag = providers.resolve(source.name).file_tag or source.name
+    secs = _split_sections(result.text) if verdict == "ok" else {}
+
+    if existing is not None:
+        # Continue in place. A declined stretch adds no block but still advances
+        # `turns` and records any title/model/filename change.
+        path = record.append_update(
+            existing, turns_from=covered + 1, turns_to=total,
+            title=meta["title"], custom_title=meta.get("custom_title", ""),
+            model=meta["model"], last_active=meta.get("last_active", ""),
+            provider_tag=tag, session_ref=ref, date=meta.get("last_active", ""),
+            done=secs.get("Done", ""), learnings=secs.get("Learnings & Gotchas", ""),
+            outstanding=secs.get("Outstanding", ""))
+        status = "updated" if verdict == "ok" else "no-record"
+        return {"uuid": ref, "status": status, "cost": result.cost_usd, "path": str(path)}
+
+    if verdict == "norecord":
+        record.mark_declined(records_dir, ref, total)
+        return {"uuid": ref, "status": "no-record", "cost": result.cost_usd}
+
     path = record.write_record(
-        records_dir,
-        provider=source.name, session_ref=ref, model=meta["model"],
-        subject=project, title=meta["title"], occurred=meta["occurred"],
-        done=secs.get("Done", ""),
-        learnings=secs.get("Learnings & Gotchas", ""),
-        outstanding=secs.get("Outstanding", ""),
-    )
+        records_dir, provider=source.name, provider_tag=tag, session_ref=ref,
+        model=meta["model"], subject=project, title=meta["title"],
+        custom_title=meta.get("custom_title", ""), session_started=meta["occurred"],
+        last_active=meta.get("last_active", ""), turns=total,
+        done=secs.get("Done", ""), learnings=secs.get("Learnings & Gotchas", ""),
+        outstanding=secs.get("Outstanding", ""))
     return {"uuid": ref, "status": "ok", "cost": result.cost_usd, "path": str(path)}
 
 
@@ -456,7 +523,10 @@ def _summary_line(outcomes: list, cost: float) -> str:
     if not outcomes:
         return "automemory: run — nothing new to check."
     n = lambda *st: sum(1 for o in outcomes if o["status"] in st)
-    parts = [f"{n('ok')} written", f"{n('no-record')} declined"]
+    parts = [f"{n('ok')} written"]
+    if n("updated"):
+        parts.append(f"{n('updated')} continued")
+    parts.append(f"{n('no-record')} declined")
     if n("empty"):
         parts.append(f"{n('empty')} empty")
     failed = n("dispatch-error", "malformed")
@@ -515,7 +585,7 @@ def run(payload: dict, *, provider: str = None, claude_projects_root=None,
               "(## Done required, else skip) into agent-records/.\n")
 
     # 2. find missing — per provider, then one shared cap across all of them
-    per_source = [[(src, ref) for ref in find_missing(src, records_dir, cwd, current)]
+    per_source = [[(src, ref, cov) for ref, cov in find_pending(src, records_dir, cwd, current)]
                   for src in sources]
     missing = _interleave(per_source)
     todo, deferred = missing[:cap], missing[cap:]
@@ -523,17 +593,17 @@ def run(payload: dict, *, provider: str = None, claude_projects_root=None,
     # 3. backfill — each session is authored by its own provider's dispatcher
     total_cost, wrote = 0.0, 0
     outcomes = []
-    for src, ref in todo:
+    for src, ref, cov in todo:
         fn = dispatch_fn or dispatch.DISPATCHERS.get(src.name, dispatch.author)
         r = backfill_one(src, ref, records_dir, project, prompt,
-                         src.scribe_models(ref, cwd), fn, cwd)
+                         src.scribe_models(ref, cwd), fn, cwd, covered=cov)
         r["provider"] = src.name
         outcomes.append(r)
         total_cost += r.get("cost", 0.0)
-        if r["status"] == "ok":
+        if r["status"] in ("ok", "updated"):
             wrote += 1
-    if wrote:
-        record.rebuild_index(records_dir, records_dir / "INDEX.md", records_link_prefix="")
+    if any(o["status"] in ("ok", "updated", "no-record") for o in outcomes):
+        record.rebuild_index(records_dir)
     # ALWAYS report, even when nothing was written: a run that checked sessions and
     # declined them all must not look the same as a run that never happened (#5).
     out.write(_summary_line(outcomes, total_cost) + "\n")
