@@ -68,6 +68,7 @@ _RECEIPT = [
     re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"),  # UUID
     re.compile(r"(?:ses|msg|prt|toolu|req)_[A-Za-z0-9]+"),   # opencode / Claude ids
     re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}"),                # git commit / sha256
+    re.compile(r"\d{8}T\d{6}Z[A-Za-z0-9_\-]*"),             # timestamped names (snapshots)
 ]
 
 

@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import dispatch, memory_mirror, providers, record, redact, transcript
+from . import dispatch, memory_mirror, progress, providers, record, redact, transcript
 
 DEFAULT_CAP = 5
 # The scribe model is NOT a constant — see providers.py. `DEFAULT_MODEL = "haiku"`
@@ -352,6 +352,16 @@ def resolve_sources(cwd: str, provider: str = None, **kw) -> list:
     return found or [_ClaudeCodeSource(projects_root=kw.get("claude_projects_root"))]
 
 
+def _display_name(src, ref: str, cwd: str) -> str:
+    """Short human label for progress lines: the session title, else its id."""
+    try:
+        t = src.meta(ref, cwd).get("title") or ""
+    except Exception:
+        t = ""
+    t = redact.redact(t)[0]
+    return (t[:48] + "…") if len(t) > 49 else (t or record.short(ref))
+
+
 def _interleave(lists: list) -> list:
     """Round-robin merge, so a shared cap can't be spent entirely on one provider."""
     out, i = [], 0
@@ -590,18 +600,25 @@ def run(payload: dict, *, provider: str = None, claude_projects_root=None,
               "(## Done required, else skip) into agent-records/.\n")
 
     # 2. find missing — per provider, then one shared cap across all of them
-    per_source = [[(src, ref, cov) for ref, cov in find_pending(src, records_dir, cwd, current)]
-                  for src in sources]
+    with progress.Spinner("checking sessions"):
+        per_source = [[(src, ref, cov) for ref, cov in find_pending(src, records_dir, cwd, current)]
+                      for src in sources]
     missing = _interleave(per_source)
     todo, deferred = missing[:cap], missing[cap:]
 
     # 3. backfill — each session is authored by its own provider's dispatcher
     total_cost, wrote = 0.0, 0
     outcomes = []
-    for src, ref, cov in todo:
+    _VERB = {"ok": "✓ wrote", "updated": "✓ continued", "no-record": "· declined",
+             "empty": "· empty", "dispatch-error": "✗ FAILED", "malformed": "✗ FAILED"}
+    for i, (src, ref, cov) in enumerate(todo, 1):
         fn = dispatch_fn or dispatch.DISPATCHERS.get(src.name, dispatch.author)
-        r = backfill_one(src, ref, records_dir, project, prompt,
-                         src.scribe_models(ref, cwd), fn, cwd, covered=cov)
+        name = _display_name(src, ref, cwd)
+        what = "continuing" if cov is not None and record.find_record(records_dir, ref) else "writing"
+        with progress.Spinner(f"{what} {i}/{len(todo)} · {src.name} · {name}"):
+            r = backfill_one(src, ref, records_dir, project, prompt,
+                             src.scribe_models(ref, cwd), fn, cwd, covered=cov)
+        progress.note(f"  {_VERB.get(r['status'], r['status'])} {name}")
         r["provider"] = src.name
         outcomes.append(r)
         total_cost += r.get("cost", 0.0)
