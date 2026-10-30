@@ -17,6 +17,8 @@ Rules:
   exploration that left no durable result — output exactly `NO-RECORD` and nothing else.
 - Facts only, drawn strictly from the transcript. Do not invent, infer beyond the text, or
   add praise, preamble, or meta-commentary.
+- Write file paths relative to the project, or with `~` for the home folder. Never
+  include a full path that reveals a username.
 - Plain declarative or first-person. Concise: a future session should re-enter the state in
   under a minute.
 - The transcript may contain `[REDACTED:...]` markers where secrets were scrubbed — treat
