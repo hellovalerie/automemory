@@ -488,7 +488,12 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
 
     meta = source.meta(ref, cwd)
     tag = providers.resolve(source.name).file_tag or source.name
-    secs = _split_sections(result.text) if verdict == "ok" else {}
+    # Second net: scrub what the scribe WROTE as well as what it read, so a
+    # secret that slipped past the first pass still never lands in a file.
+    secs = ({k: redact.redact(v)[0] for k, v in _split_sections(result.text).items()}
+            if verdict == "ok" else {})
+    meta = dict(meta, title=redact.redact(meta.get("title", ""))[0],
+                custom_title=redact.redact(meta.get("custom_title", ""))[0])
 
     if existing is not None:
         # Continue in place. A declined stretch adds no block but still advances

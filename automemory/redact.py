@@ -38,6 +38,10 @@ _WHOLE = [
     ("stripe-key", re.compile(r"\b[sr]k_(?:live|test)_[0-9A-Za-z]{16,}")),
     ("gitlab-token", re.compile(r"\bglpat-[0-9A-Za-z_\-]{20,}")),
     ("npm-token", re.compile(r"\bnpm_[0-9A-Za-z]{36}")),
+    ("huggingface-token", re.compile(r"\bhf_[A-Za-z0-9]{30,}")),
+    ("xai-key", re.compile(r"\bxai-[A-Za-z0-9]{20,}")),
+    ("sendgrid-key", re.compile(r"\bSG\.[A-Za-z0-9_\-]{16,}\.[A-Za-z0-9_\-]{16,}")),
+    ("bearer-token", re.compile(r"(?i)(?<=bearer )[A-Za-z0-9_\-.=+/]{16,}")),
 ]
 
 # --- group patterns: only a captured group is the secret (keep structure) -----
@@ -46,12 +50,44 @@ _URL_CRED = re.compile(r"([a-zA-Z][\w+.\-]*://[^\s:@/]+:)([^\s:@/]+)(@)")
 # Labeled assignment: password=... / api_key: "..." -> redact the value (group 2).
 _LABELED = re.compile(
     r"""(?ix)
-    \b(password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|
+    \b(?:[A-Za-z0-9]+[_-])*               # prefixed labels: OPENAI_API_KEY, DB_PASSWORD
+    (password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|
        secret[_-]?key|private[_-]?key|client[_-]?secret|auth[_-]?token|bearer)
     \b \s* [:=] \s* ["']?
     (?!\[REDACTED)                 # don't re-match an already-redacted placeholder
     ([^\s"',;]{6,})
     """)
+
+
+# --- the cautious net: long random-looking strings ------------------------------
+# Owner's call (2026-10-30): err cautious. Any run of 32+ token characters mixing
+# upper case, lower case and digits is scrubbed — UNLESS it is one of the receipt
+# shapes records need as provenance (listed in the README):
+_RANDOMISH = re.compile(r"(?<![A-Za-z0-9_\-+=])[A-Za-z0-9_\-+=]{32,}(?![A-Za-z0-9_\-+=])")
+_RECEIPT = [
+    re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"),  # UUID
+    re.compile(r"(?:ses|msg|prt|toolu|req)_[A-Za-z0-9]+"),   # opencode / Claude ids
+    re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}"),                # git commit / sha256
+]
+
+
+def _is_receipt(tok: str) -> bool:
+    return any(p.fullmatch(tok) for p in _RECEIPT)
+
+
+def _randomish(m, counts: Counter) -> str:
+    tok = m.group(0)
+    if _is_receipt(tok) or "[REDACTED" in tok:
+        return tok
+    if re.fullmatch(r"[0-9a-fA-F]+", tok):
+        # Hex that ISN'T git/sha256 length (already let through above): many API
+        # keys are exactly this shape (e.g. 32-hex), so scrub it.
+        counts["high-entropy"] += 1
+        return _PH.format(kind="high-entropy")
+    if not (re.search(r"[a-z]", tok) and re.search(r"[A-Z]", tok) and re.search(r"[0-9]", tok)):
+        return tok  # identifiers like long_snake_case_names aren't secrets
+    counts["high-entropy"] += 1
+    return _PH.format(kind="high-entropy")
 
 
 def _sub_group(match, group: int, kind: str, counts: Counter) -> str:
@@ -74,5 +110,6 @@ def redact(text: str):
 
     text = _URL_CRED.sub(lambda m: _sub_group(m, 2, "url-credential", counts), text)
     text = _LABELED.sub(lambda m: _sub_group(m, 2, "labeled-secret", counts), text)
+    text = _RANDOMISH.sub(lambda m: _randomish(m, counts), text)
 
     return text, counts
