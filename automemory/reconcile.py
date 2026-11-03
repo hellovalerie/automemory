@@ -740,6 +740,15 @@ def run(payload: dict, *, provider: str = None, claude_projects_root=None,
             if o["status"] in ("dispatch-error", "malformed"):
                 out.write(f"automemory:   {o['status']} {o.get('provider', '')}:{o['uuid']}"
                           f"{' — ' + o['error'].strip()[:200] if o.get('error') else ''}\n")
+        stale = [p.name for p in Path(records_dir).glob("*.md") if p.name != record.INDEX_NAME
+                 and record.is_record(record._fm_parse(p.read_text(encoding="utf-8")))
+                 and (record.is_legacy(record._fm_parse(p.read_text(encoding="utf-8")))
+                      or record.needs_reshape(record._split(p.read_text(encoding="utf-8"))[1]))]
+        if stale:
+            # Never reshaped silently: a format change rewrites sacred data, so the
+            # user decides (migrate snapshots first).
+            out.write(f"automemory: {len(stale)} record(s) in an older format — "
+                      f"run `automemory migrate` to update them (snapshot first).\n")
         if deferred:
             out.write(f"automemory: {len(deferred)} older session(s) pending — "
                       f"run `automemory process` to catch up.\n")
