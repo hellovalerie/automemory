@@ -199,6 +199,32 @@ def covered_turns(records_dir, session_ref: str):
     return _declined_load(records_dir).get(session_ref)
 
 
+# --- ignored sessions (never recorded) -------------------------------------------
+# Revived from Engine B's capture-ignore-sessions.txt (2026-11-03): sessions that
+# must never become records — e.g. evaluation runs, whose records would leak one
+# test's answers into the next. One session id per line; `#` comments allowed.
+IGNORE_NAME = ".ignore-sessions"
+
+
+def ignored_sessions(records_dir) -> set:
+    try:
+        lines = (Path(records_dir) / IGNORE_NAME).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return set()
+    return {l.split("#", 1)[0].strip() for l in lines if l.split("#", 1)[0].strip()}
+
+
+def ignore_session(records_dir, session_ref: str, note: str = "") -> bool:
+    """Add a session to the ignore list. False if it was already there."""
+    if session_ref in ignored_sessions(records_dir):
+        return False
+    p = Path(records_dir) / IGNORE_NAME
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("a", encoding="utf-8") as fh:
+        fh.write(f"{session_ref}" + (f"  # {note}" if note else "") + "\n")
+    return True
+
+
 # --- declined sessions (no record file, so a sidecar remembers them) ----------
 
 

@@ -326,6 +326,19 @@ def cmd_migrate(_args) -> int:
     return 0
 
 
+def cmd_ignore(args) -> int:
+    """Never record these sessions (e.g. evaluation runs). Doesn't touch a record
+    that already exists — that stays until the user decides."""
+    recs = reconcile.records_dir_for(str(Path.cwd()))
+    for ref in args.session:
+        added = record.ignore_session(recs, ref, note=args.note or "")
+        print(f"automemory: {'ignoring' if added else 'already ignoring'} {ref}")
+        if record.find_record(recs, ref) is not None:
+            print(f"  note: it already has a record ({record.find_record(recs, ref).name}); "
+                  f"ignoring stops future updates, it doesn't remove that file.")
+    return 0
+
+
 def cmd_reconcile(args) -> int:
     return reconcile.main(["--background"] if getattr(args, "background", False) else [])
 
@@ -599,12 +612,15 @@ def main(argv=None) -> int:
     p_rc = sub.add_parser("reconcile", help="record every session with new turns (amlog)")
     p_rc.add_argument("--background", action="store_true", help=argparse.SUPPRESS)
     sub.add_parser("hook", help=argparse.SUPPRESS)  # Claude Code hook entrypoint
+    p_ig = sub.add_parser("ignore", help="never record these sessions (e.g. eval runs)")
+    p_ig.add_argument("session", nargs="+", help="session id(s)")
+    p_ig.add_argument("--note", help="why (kept as a comment in the list)")
     args = p.parse_args(argv)
     if args.cmd is None:
         return cmd_setup(args)
     return {
         "init": cmd_init, "status": cmd_status, "peep": cmd_peep, "reconcile": cmd_reconcile,
-        "migrate": cmd_migrate, "hook": cmd_hook,
+        "migrate": cmd_migrate, "hook": cmd_hook, "ignore": cmd_ignore,
         "enable": cmd_enable, "disable": cmd_disable, "projects": cmd_projects,
     }[args.cmd](args)
 

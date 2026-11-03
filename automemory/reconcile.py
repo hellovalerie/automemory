@@ -424,8 +424,9 @@ def find_pending(source: _Source, records_dir: Path, cwd: str, current_session: 
     here, before the cap, so they can't eat it (measured 2026-10-17).
     """
     out = []
+    ignored = record.ignored_sessions(records_dir)
     for ref in source.list_ids(cwd):
-        if ref == current_session or source.is_scribe(ref, cwd):
+        if ref == current_session or source.is_scribe(ref, cwd) or ref in ignored:
             continue
         covered = record.covered_turns(records_dir, ref)
         if covered is None:
