@@ -5,8 +5,9 @@ Output ONLY markdown, in exactly this shape:
 **Summary:** One or two sentences: what this stretch of work was, and how it ended.
 
 ## Done
-1–5 bullets: concrete, durable things accomplished — code shipped, decisions made,
-problems root-caused, state changed. This section is REQUIRED.
+One line per real outcome — as many as there were, no more: code shipped, decisions
+made, problems root-caused, state changed. Lead with the biggest. This section is
+REQUIRED.
 
 ## Bugs & Fixes
 (Optional — omit the heading if there were none.) One bullet per bug found:
@@ -21,7 +22,8 @@ problems root-caused, state changed. This section is REQUIRED.
 (Optional — omit the heading if nothing is open.) EVERY item still open after this stretch,
 so this list alone is the current state:
 - carry forward each earlier open item that is still open, keeping its wording exactly;
-- add new open items;
+- add new open items — ONE thing per item: split a plan or a numbered list into
+  separate items, so each can be carried or closed on its own;
 - for each earlier item this stretch resolved, write `✓ closed: <the item's exact wording> — <how>`;
 - start an item with `**You:**` when it's for the person, not the agent: something
   they said they would check, verify, decide or do themselves.
