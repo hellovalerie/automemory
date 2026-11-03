@@ -496,10 +496,97 @@ def cmd_projects(_args) -> int:
     return 0
 
 
+_CONSENT_TEXT = """\
+automemory records your AI coding sessions in this folder.
+
+  - It reads the transcripts your tools already keep (Claude Code, opencode)
+    for sessions run in this folder. It never copies or moves them.
+  - A separate model call (the "scribe") writes a short record of each session
+    into ./agent-records/. Secrets it recognises are scrubbed first.
+  - Records describe the work done here. If you commit agent-records/, that
+    description travels with the repo; keep it local if it shouldn't.
+  - Each record costs one small model call on your own account.
+"""
+
+
+def _ensure_local_ignored(project: Path) -> str:
+    """Keep the personal hook file out of git via the repo's LOCAL exclude list
+    (.git/info/exclude — never committed, affects no one else). '' if not a repo
+    or already ignored."""
+    import subprocess
+    target = ".claude/" + SETTINGS_FILE
+    try:
+        r = subprocess.run(["git", "-C", str(project), "check-ignore", "-q", target],
+                           capture_output=True)
+        if r.returncode == 0:
+            return ""  # already ignored (e.g. a global gitignore)
+        git_dir = subprocess.run(["git", "-C", str(project), "rev-parse", "--git-dir"],
+                                 capture_output=True, text=True)
+        if git_dir.returncode != 0:
+            return ""  # not a git repo
+    except OSError:
+        return ""
+    excl = (project / git_dir.stdout.strip() / "info" / "exclude")
+    excl.parent.mkdir(parents=True, exist_ok=True)
+    with excl.open("a", encoding="utf-8") as fh:
+        fh.write(f"\n# automemory: personal hook file (machine-specific path)\n{target}\n")
+    return str(excl)
+
+
+def cmd_setup(args) -> int:
+    """`automemory` with no command: set this folder up for every installed tool.
+    Asks first (a person at a terminal); `--yes` skips the question."""
+    project = Path.cwd().resolve()
+    if project in (Path.home().resolve(), Path(project.anchor)):
+        print("automemory: run this inside a project folder, not your home folder or /.")
+        return 1
+    tools = [t for t in ("claude", "opencode") if shutil.which(t)]
+    if not tools:
+        print("automemory: neither `claude` nor `opencode` is installed — nothing to record.")
+        return 1
+    entry = _consent_load().get(str(project))
+    if _consent_state(entry) == "on" and not getattr(args, "yes", False):
+        print(f"automemory: already recording {project.name}.")
+        return cmd_status(args)
+    if not getattr(args, "yes", False):
+        if not sys.stdin.isatty():
+            print("automemory: not a terminal — re-run with --yes to set up without asking.")
+            return 1
+        print(_CONSENT_TEXT)
+        answer = input(f"Record sessions in {project.name}? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("automemory: nothing changed.")
+            return 0
+
+    d = scaffold_records(project)
+    projects = _consent_load()
+    prev = projects.get(str(project))
+    projects[str(project)] = dict(prev if isinstance(prev, dict) else {}, state="on")
+    _consent_save(projects)
+    record_engine_command()
+    print(f"\nautomemory: recording {project.name} -> {d.relative_to(project)}/")
+    if "claude" in tools:
+        try:
+            res = wire_hook(project, hook_command_for(project))
+            print(f"  Claude Code: start + end hooks {res.replace('-', ' ')} "
+                  f"(.claude/{SETTINGS_FILE}, personal, not committed)")
+            excl = _ensure_local_ignored(project)
+            if excl:
+                print(f"  git: .claude/{SETTINGS_FILE} added to this repo's local ignore list")
+        except ValueError as e:
+            print(f"  Claude Code: NOT wired — {e}")
+    if "opencode" in tools:
+        print(f"  opencode: plugin {install_opencode_plugin()} (restart opencode to load it)")
+    print("\nRecords are written in the background as sessions start and end. "
+          "To record right now: automemory reconcile")
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="automemory", description="passive capture engine for AI conversations")
-    sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("init", help="wire the SessionStart hook + scaffold agent-records/")
+    p.add_argument("--yes", action="store_true", help="set up without asking")
+    sub = p.add_subparsers(dest="cmd")
+    sub.add_parser("init", help="(alias) wire this folder's triggers; prefer plain `automemory`")
     sub.add_parser("migrate", help="convert old-format records (snapshots them first)")
     sub.add_parser("status", help="record count, latest, hook state")
     sub.add_parser("peep", help="print the record index (titles)")
@@ -513,6 +600,8 @@ def main(argv=None) -> int:
     p_rc.add_argument("--background", action="store_true", help=argparse.SUPPRESS)
     sub.add_parser("hook", help=argparse.SUPPRESS)  # Claude Code hook entrypoint
     args = p.parse_args(argv)
+    if args.cmd is None:
+        return cmd_setup(args)
     return {
         "init": cmd_init, "status": cmd_status, "peep": cmd_peep, "reconcile": cmd_reconcile,
         "migrate": cmd_migrate, "hook": cmd_hook,
