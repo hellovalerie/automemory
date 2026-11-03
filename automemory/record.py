@@ -222,13 +222,40 @@ def mark_declined(records_dir, session_ref: str, turns: int) -> None:
 # --- body assembly --------------------------------------------------------------
 
 
-def _sections(done: str, learnings: str, outstanding: str, level: str = "##") -> list:
-    parts = [f"{level} Done", done.strip(), ""]
-    if learnings and learnings.strip():
-        parts += [f"{level} Learnings & Gotchas", learnings.strip(), ""]
-    if outstanding and outstanding.strip():
-        parts += [f"{level} Outstanding", outstanding.strip(), ""]
+def _sections(done: str, learnings: str, outstanding: str, level: str = "##",
+              summary: str = "", bugs: str = "") -> list:
+    parts = [f"**Summary:** {summary.strip()}", ""] if summary and summary.strip() else []
+    parts += [f"{level} Done", done.strip(), ""]
+    for head, text in (("Bugs & Fixes", bugs), ("Learnings & Gotchas", learnings),
+                       ("Outstanding", outstanding)):
+        if text and text.strip():
+            parts += [f"{level} {head}", text.strip(), ""]
     return parts
+
+
+def update_block(date: str, turns_from: int, turns_to: int, *, done: str,
+                 summary: str = "", bugs: str = "", learnings: str = "",
+                 outstanding: str = "") -> str:
+    """Every batch of a session — the first one too — has this one shape."""
+    header = f"## Update — {date} · turns {turns_from}–{turns_to}"
+    return "\n".join([header, "", *_sections(done, learnings, outstanding, "###",
+                                              summary=summary, bugs=bugs)]).rstrip("\n")
+
+
+def latest_outstanding(body: str) -> list:
+    """The current open list: the newest update's `### Outstanding` bullets, minus
+    `✓ closed:` lines. (Each update restates every still-open item, so the newest
+    one alone is the current state.) Legacy shape: the top-level `## Outstanding`."""
+    for sec in _top_sections(body):
+        if _UPDATE.match(sec) or sec.startswith("## Outstanding"):
+            m = (re.search(r"(?ms)^### Outstanding\s*\n(.*?)(?=^#{2,3} |\Z)", sec)
+                 if _UPDATE.match(sec) else re.match(r"(?ms)^## Outstanding\s*\n(.*)", sec))
+            if _UPDATE.match(sec) and not m:
+                return []  # newest update says nothing is open
+            if m:
+                return [l.rstrip() for l in m.group(1).splitlines()
+                        if l.strip().startswith(("-", "*")) and "✓ closed" not in l]
+    return []
 
 
 _TAIL = ("## Changes", "## Edits")
@@ -277,7 +304,7 @@ def write_record(records_dir, *, provider: str, provider_tag: str, session_ref: 
                  model: str, subject: str, title: str, custom_title: str = "",
                  session_started: str, last_active: str = "", turns: int = 0,
                  done: str, learnings: str = "", outstanding: str = "",
-                 captured: str = "") -> Path:
+                 summary: str = "", bugs: str = "", captured: str = "") -> Path:
     """Create a session's record. `done` is mandatory — it IS the write-gate.
     A session that already has a record must use `append_update` instead."""
     if not (done and done.strip()):
@@ -296,7 +323,10 @@ def write_record(records_dir, *, provider: str, provider_tag: str, session_ref: 
         "turns": turns, "captured": captured or now_iso(), "subject": slug(subject),
         "status": "open",
     }
-    body = "\n".join(["", *_sections(done, learnings, outstanding), "## Edits", "none", ""])
+    block = update_block(session_started if not last_active else last_active, 1, turns,
+                         done=done, summary=summary, bugs=bugs, learnings=learnings,
+                         outstanding=outstanding)
+    body = "\n" + block + "\n\n## Edits\nnone\n"
     _guarded_write(path, _fm_dump(fields) + "\n" + body)
     return path
 
@@ -308,7 +338,7 @@ def append_update(path, *, turns_from: int, turns_to: int, title: str,
                   custom_title: str = "", model: str, last_active: str,
                   provider_tag: str, session_ref: str, done: str = "",
                   learnings: str = "", outstanding: str = "", date: str = "",
-                  captured: str = "") -> Path:
+                  summary: str = "", bugs: str = "", captured: str = "") -> Path:
     """Continue a record exactly where it left off.
 
     - A dated `## Update — <date> · turns A–B` block, only if the scribe found
@@ -324,10 +354,10 @@ def append_update(path, *, turns_from: int, turns_to: int, title: str,
     fm, body = _split(path.read_text(encoding="utf-8"))
 
     if done and done.strip():
-        header = f"## Update — {date} · turns {turns_from}–{turns_to}"
-        block = "\n".join([header, "", *_sections(done, learnings, outstanding, "###")])
+        block = update_block(date, turns_from, turns_to, done=done, summary=summary,
+                             bugs=bugs, learnings=learnings, outstanding=outstanding)
         # Freshest first: a new update goes straight under the frontmatter.
-        body = "\n" + block.rstrip("\n") + "\n\n" + body.lstrip("\n")
+        body = "\n" + block + "\n\n" + body.lstrip("\n")
 
     changes = []
     if title and title != fm.get("title"):
@@ -437,6 +467,55 @@ def updates_out_of_order(body: str) -> bool:
     n = sum(1 for t in tags if t)
     turns = [int(t.group(1)) for t in tags[:n] if t]
     return n > 0 and (len(turns) != n or turns != sorted(turns, reverse=True))
+
+
+_ORIGINAL = ("## Done", "## Bugs & Fixes", "## Learnings & Gotchas", "## Outstanding")
+
+
+def needs_reshape(body: str) -> bool:
+    """True if the session's first batch still sits as top-level `## Done` etc.
+    instead of an `## Update — … · turns 1–N` block like every other batch."""
+    return any(s.startswith(_ORIGINAL) for s in _top_sections(body))
+
+
+def reshape_first_batch(path, date: str = "") -> bool:
+    """Wrap a record's original top-level sections into `## Update — <started> ·
+    turns 1–N` (N = the turn before the earliest update, or all turns), with the
+    headings demoted to `###`. Runs only from `automemory migrate`, after its
+    snapshot; its own check: every non-blank line survives, apart from the
+    demoted headings and the one new heading."""
+    path = Path(path)
+    date = date or today()
+    fm, body = _split(path.read_text(encoding="utf-8"))
+    if not needs_reshape(body):
+        return False
+    secs = [s for s in _top_sections(body) if s.strip()]
+    orig = [s for s in secs if s.startswith(_ORIGINAL)]
+    first_from = [int(m.group(0).split("turns ")[1].split("–")[0])
+                  for m in (re.match(r"^## Update — .*turns \d+", s) for s in secs) if m]
+    last = (min(first_from) - 1) if first_from else int(fm.get("turns") or 0)
+    inner = "\n".join(("#" + s) for s in orig)  # "## Done" -> "### Done"
+    block = (f"## Update — {fm.get('session_started', '')} · turns 1–{last}\n\n"
+             + inner.strip("\n") + "\n")
+    out, placed = [], False
+    for s in secs:
+        if s.startswith(_ORIGINAL):
+            if not placed:
+                # The first batch is the OLDEST: it goes after every update.
+                placed = True
+            continue
+        out.append(s.strip("\n") + "\n")
+    tail = [s for s in out if s.startswith(("## Changes", "## Edits"))]
+    head = [s for s in out if not s.startswith(("## Changes", "## Edits"))]
+    new = "\n" + "\n".join(head + [block] + tail)
+    norm = lambda t: sorted(l.lstrip("#") for l in t.splitlines()
+                            if l.strip() and not _UPDATE.match(l))
+    if norm(new) != norm(body):
+        raise AppendOnlyViolation(f"reshape would change content in {path}")
+    new = _add_changes(new, [f"{date} · format: first batch wrapped as an `## Update` "
+                             f"block (turns 1–{last}) like every later batch"])
+    path.write_text(_fm_dump(fm) + "\n" + new, encoding="utf-8")
+    return True
 
 
 def reorder_updates(path, date: str = "") -> bool:

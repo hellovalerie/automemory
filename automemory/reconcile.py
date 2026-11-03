@@ -51,8 +51,12 @@ def _load_prompt() -> str:
 
 
 def _split_sections(md: str) -> dict:
-    """Split authored markdown into {heading: body}."""
+    """Split authored markdown into {heading: body}; a leading `**Summary:** …`
+    line becomes {"Summary": …}."""
     secs, cur, buf = {}, None, []
+    m = re.search(r"(?m)^\*\*Summary:\*\*\s*(.+)$", md.split("## ", 1)[0])
+    if m:
+        secs["Summary"] = m.group(1).strip()
     for line in md.splitlines():
         m = re.match(r"^##\s+(.*)", line)
         if m:
@@ -415,11 +419,12 @@ def find_missing(source: _Source, records_dir: Path, cwd: str, current_session: 
 
 
 _CONTINUE = (
-    "\n\nThis session ALREADY HAS a record (below, between BEGIN/END RECORD). "
-    "Write ONLY what is new in the transcript you are given — the new turns since "
-    "that record. Do not repeat anything the record already says. Same sections, "
-    "same write-gate: if the new turns produced nothing durable, output exactly "
-    "NO-RECORD."
+    "\n\nThis session ALREADY HAS a record. The transcript you are given is ONLY the "
+    "new turns since then. Write only what is new in them — do not repeat earlier work. "
+    "The items still open before these turns are listed between BEGIN/END OPEN ITEMS: "
+    "in `## Outstanding`, close each one these turns resolved (`✓ closed: <item> — "
+    "<how>`), carry forward each one they don't mention, and add new ones. Same "
+    "write-gate: if the new turns produced nothing durable, output exactly NO-RECORD."
 )
 
 
@@ -461,9 +466,14 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
     existing = record.find_record(records_dir, ref) if covered is not None else None
 
     if existing is not None:
+        # Only the CURRENT open list, not the whole old record: stale text handed
+        # to the scribe spreads (measured 2026-11-03 — a never-closed "not built"
+        # item was merged with new turns into a false claim).
         _, prior = record._split(existing.read_text(encoding="utf-8"))
+        open_items = "\n".join(record.latest_outstanding(prior)) or "(none)"
         text = "".join(turns[covered:])
-        instruction = prompt + _CONTINUE + f"\n\n--- BEGIN RECORD ---\n{prior.strip()}\n--- END RECORD ---"
+        instruction = (prompt + _CONTINUE
+                       + f"\n\n--- BEGIN OPEN ITEMS ---\n{open_items}\n--- END OPEN ITEMS ---")
     else:
         text, instruction = full, prompt
     scrubbed, _ = redact.redact(text)
@@ -514,7 +524,8 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
             model=meta["model"], last_active=meta.get("last_active", ""),
             provider_tag=tag, session_ref=ref, date=meta.get("last_active", ""),
             done=secs.get("Done", ""), learnings=secs.get("Learnings & Gotchas", ""),
-            outstanding=secs.get("Outstanding", ""))
+            outstanding=secs.get("Outstanding", ""), summary=secs.get("Summary", ""),
+            bugs=secs.get("Bugs & Fixes", ""))
         status = "updated" if verdict == "ok" else "no-record"
         return {"uuid": ref, "status": status, "cost": result.cost_usd, "path": str(path)}
 
@@ -528,7 +539,8 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
         custom_title=meta.get("custom_title", ""), session_started=meta["occurred"],
         last_active=meta.get("last_active", ""), turns=total,
         done=secs.get("Done", ""), learnings=secs.get("Learnings & Gotchas", ""),
-        outstanding=secs.get("Outstanding", ""))
+        outstanding=secs.get("Outstanding", ""), summary=secs.get("Summary", ""),
+        bugs=secs.get("Bugs & Fixes", ""))
     return {"uuid": ref, "status": "ok", "cost": result.cost_usd, "path": str(path)}
 
 

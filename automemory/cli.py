@@ -284,9 +284,11 @@ def cmd_migrate(_args) -> int:
         ref = record._fm_parse(p.read_text(encoding="utf-8"))["source"].partition(":")[2]
         return (p.stem.rsplit("-", 1)[-1] != record.short(ref), p.name)
     legacy.sort(key=_order)
+    def _body(p):
+        return record._split(p.read_text(encoding="utf-8"))[1]
     reorder = [p for p in recs.glob("*.md") if p.name != record.INDEX_NAME
                and record.is_record(record._fm_parse(p.read_text(encoding="utf-8")))
-               and record.updates_out_of_order(record._split(p.read_text(encoding="utf-8"))[1])]
+               and (record.updates_out_of_order(_body(p)) or record.needs_reshape(_body(p)))]
     if not legacy and not reorder:
         print("automemory migrate: nothing to migrate.")
         return 0
@@ -315,8 +317,8 @@ def cmd_migrate(_args) -> int:
         print(f"  {p.name} -> {new.name}  (turns {turns})")
     for p in recs.glob("*.md"):
         if p.name != record.INDEX_NAME and record.is_record(record._fm_parse(p.read_text(encoding="utf-8"))) \
-                and record.reorder_updates(p):
-            print(f"  {p.name}: updates moved to the top, newest first")
+                and (record.reorder_updates(p) | record.reshape_first_batch(p)):
+            print(f"  {p.name}: reshaped (every batch an `## Update`, newest first)")
     record.rebuild_index(recs)
     print(f"automemory migrate: {len(legacy)} legacy record(s) converted, "
           f"{len(reorder)} reordered; INDEX rebuilt. "
