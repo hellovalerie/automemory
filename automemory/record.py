@@ -472,10 +472,32 @@ def updates_out_of_order(body: str) -> bool:
 _ORIGINAL = ("## Done", "## Bugs & Fixes", "## Learnings & Gotchas", "## Outstanding")
 
 
+_DATED = re.compile(r"^## Update[ —]+(\d{4}-\d{2}-\d{2})")
+
+
+def _sort_key(sec: str):
+    """Updates newest first: by date, then by turn number when both are present."""
+    m = _DATED.match(sec)
+    t = _UPDATE.match(sec)
+    return (m.group(1) if m else "", int(t.group(1)) if t else 0)
+
+
+def _canonical(secs: list) -> list:
+    """Updates (auto and hand-written) newest first, then anything else as found,
+    then `## Changes`, then `## Edits` — always last."""
+    ups = sorted((x for x in secs if _DATED.match(x)), key=_sort_key, reverse=True)
+    other = [x for x in secs if not _DATED.match(x) and not x.startswith(("## Changes", "## Edits"))]
+    return ups + other + [x for x in secs if x.startswith("## Changes")] \
+        + [x for x in secs if x.startswith("## Edits")]
+
+
 def needs_reshape(body: str) -> bool:
-    """True if the session's first batch still sits as top-level `## Done` etc.
-    instead of an `## Update — … · turns 1–N` block like every other batch."""
-    return any(s.startswith(_ORIGINAL) for s in _top_sections(body))
+    """True if the first batch still sits as top-level `## Done` etc., or the
+    sections aren't in canonical order (updates newest first, Edits last)."""
+    secs = [x for x in _top_sections(body) if x.strip()]
+    if any(x.startswith(_ORIGINAL) for x in secs):
+        return True
+    return [x.strip() for x in secs] != [x.strip() for x in _canonical(secs)]
 
 
 def reshape_first_batch(path, date: str = "") -> bool:
@@ -505,15 +527,18 @@ def reshape_first_batch(path, date: str = "") -> bool:
                 placed = True
             continue
         out.append(s.strip("\n") + "\n")
-    tail = [s for s in out if s.startswith(("## Changes", "## Edits"))]
-    head = [s for s in out if not s.startswith(("## Changes", "## Edits"))]
-    new = "\n" + "\n".join(head + [block] + tail)
+    has_orig = bool(orig)
+    if has_orig:
+        out.append(block)
+    new = "\n" + "\n".join(x.strip("\n") + "\n" for x in _canonical(out))
     norm = lambda t: sorted(l.lstrip("#") for l in t.splitlines()
                             if l.strip() and not _UPDATE.match(l))
     if norm(new) != norm(body):
         raise AppendOnlyViolation(f"reshape would change content in {path}")
-    new = _add_changes(new, [f"{date} · format: first batch wrapped as an `## Update` "
-                             f"block (turns 1–{last}) like every later batch"])
+    new = _add_changes(new, [(f"{date} · format: first batch wrapped as an `## Update` "
+                              f"block (turns 1–{last}) like every later batch")
+                             if has_orig else
+                             f"{date} · format: sections put in order (updates newest first, Edits last)"])
     path.write_text(_fm_dump(fm) + "\n" + new, encoding="utf-8")
     return True
 
