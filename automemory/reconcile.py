@@ -601,7 +601,16 @@ OPEN_RECORDS, OPEN_LINES = 3, 12  # keep the start-of-session context small
 # 2026-11-03: October records still listed "the trigger does not exist", fixed
 # weeks before in a prose note) — pushing them into every new session would feed
 # the live agent the same stale claims that once misled the scribe.
-OPEN_DAYS = 14
+OPEN_DAYS = 14  # default; the user's global config `open_items_days` overrides it
+
+
+def _open_days() -> int:
+    try:
+        cfg = Path(os.environ.get("AUTOMEMORY_CONFIG")
+                   or (Path.home() / ".config" / "opencode" / "automemory.json"))
+        return int(json.loads(cfg.read_text(encoding="utf-8")).get("open_items_days", OPEN_DAYS))
+    except (OSError, ValueError, TypeError):
+        return OPEN_DAYS
 
 
 def open_items_text(records_dir: Path) -> str:
@@ -609,7 +618,7 @@ def open_items_text(records_dir: Path) -> str:
     the most recently active records — so the live agent can act on them, and the
     next update can close them. Without this, nothing put open items in front of
     anyone who could act (diagnosed 2026-10-30)."""
-    rows = []
+    rows, window = [], _open_days()
     for p in Path(records_dir).glob("*.md"):
         if p.name == record.INDEX_NAME:
             continue
@@ -621,8 +630,8 @@ def open_items_text(records_dir: Path) -> str:
             from datetime import date as _d
             age = (_d.today() - _d.fromisoformat(fm.get("last_active", ""))).days
         except ValueError:
-            age = OPEN_DAYS + 1
-        if items and age <= OPEN_DAYS:
+            age = window + 1
+        if items and age <= window:
             rows.append((fm.get("last_active", ""), fm, p.name, items))
     if not rows:
         return ""
