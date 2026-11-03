@@ -335,8 +335,9 @@ def resolve_source(cwd: str, provider: str = None, **kw) -> _Source:
     oc = _OpencodeSource(db=kw.get("opencode_db"))
     if oc.list_ids(cwd):
         return oc
-    cc = _ClaudeCodeSource(projects_root=kw.get("claude_projects_root"))
-    return cc if cc.list_ids(cwd) else oc
+    # Neither store has sessions here yet (a new project): the default provider —
+    # not opencode, which made `init` wire nothing in a fresh folder (found 2026-11-03).
+    return _ClaudeCodeSource(projects_root=kw.get("claude_projects_root"))
 
 
 def resolve_sources(cwd: str, provider: str = None, **kw) -> list:
