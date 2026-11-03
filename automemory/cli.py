@@ -353,7 +353,10 @@ def cmd_hook(_args) -> int:
     payload = reconcile.read_payload()
     cwd = payload.get("cwd") or os.getcwd()
     event = payload.get("hook_event_name", "SessionStart")
-    if event == "SessionStart":
+    # AUTOMEMORY_HANDOVER=0 keeps the startup output silent for one session — used
+    # by the orientation test's "without records" arm, which must not see the map
+    # or open items. Recording itself is unaffected.
+    if event == "SessionStart" and os.environ.get("AUTOMEMORY_HANDOVER", "1") != "0":
         sys.stdout.write(reconcile.handover_text(reconcile.records_dir_for(cwd)))
         sys.stdout.flush()
     bg = dict(payload)
