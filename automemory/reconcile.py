@@ -592,7 +592,49 @@ def handover_text(records_dir: Path) -> str:
     if not idx.exists():
         return ""
     return ("=== automemory: session map ===\n"
-            + idx.read_text(encoding="utf-8").rstrip() + "\n\n")
+            + idx.read_text(encoding="utf-8").rstrip() + "\n\n"
+            + open_items_text(records_dir))
+
+
+OPEN_RECORDS, OPEN_LINES = 3, 12  # keep the start-of-session context small
+# Only records active this recently. Older open lists are usually stale (measured
+# 2026-11-03: October records still listed "the trigger does not exist", fixed
+# weeks before in a prose note) — pushing them into every new session would feed
+# the live agent the same stale claims that once misled the scribe.
+OPEN_DAYS = 14
+
+
+def open_items_text(records_dir: Path) -> str:
+    """The current open list (newest update's Outstanding, minus closed items) of
+    the most recently active records — so the live agent can act on them, and the
+    next update can close them. Without this, nothing put open items in front of
+    anyone who could act (diagnosed 2026-10-30)."""
+    rows = []
+    for p in Path(records_dir).glob("*.md"):
+        if p.name == record.INDEX_NAME:
+            continue
+        fm, body = record._split(p.read_text(encoding="utf-8"))
+        if not record.is_record(fm):
+            continue
+        items = record.latest_outstanding(body)
+        try:
+            from datetime import date as _d
+            age = (_d.today() - _d.fromisoformat(fm.get("last_active", ""))).days
+        except ValueError:
+            age = OPEN_DAYS + 1
+        if items and age <= OPEN_DAYS:
+            rows.append((fm.get("last_active", ""), fm, p.name, items))
+    if not rows:
+        return ""
+    rows.sort(key=lambda r: r[0], reverse=True)
+    out = ["=== automemory: open items (newest update of each record) ==="]
+    for last, fm, name, items in rows[:OPEN_RECORDS]:
+        out.append(f"{fm.get('title', name)} · last active {last} · {name}")
+        out += items[:OPEN_LINES]
+        if len(items) > OPEN_LINES:
+            out.append(f"  … {len(items) - OPEN_LINES} more in the record")
+        out.append("")
+    return "\n".join(out) + "\n"
 
 
 class _ProjectLock:
