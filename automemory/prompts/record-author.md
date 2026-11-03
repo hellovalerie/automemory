@@ -22,7 +22,9 @@ problems root-caused, state changed. This section is REQUIRED.
 so this list alone is the current state:
 - carry forward each earlier open item that is still open, in its own words;
 - add new open items;
-- for each earlier item this stretch resolved, write `✓ closed: <item> — <how>`.
+- for each earlier item this stretch resolved, write `✓ closed: <item> — <how>`;
+- start an item with `**You:**` when it's for the person, not the agent: something
+  they said they would check, verify, decide or do themselves.
 
 Rules:
 - **Write-gate:** if the session produced no concrete Done — pure Q&A, reading, or

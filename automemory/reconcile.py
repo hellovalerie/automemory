@@ -630,6 +630,10 @@ def open_items_text(records_dir: Path) -> str:
     out = ["=== automemory: open items (newest update of each record) ==="]
     for last, fm, name, items in rows[:OPEN_RECORDS]:
         out.append(f"{fm.get('title', name)} · last active {last} · {name}")
+        # Items for the person first, so a verification they asked to be reminded
+        # of isn't buried under the agent's to-do list.
+        items = ([i for i in items if "**You:**" in i]
+                 + [i for i in items if "**You:**" not in i])
         out += items[:OPEN_LINES]
         if len(items) > OPEN_LINES:
             out.append(f"  … {len(items) - OPEN_LINES} more in the record")
