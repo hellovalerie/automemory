@@ -20,9 +20,9 @@ problems root-caused, state changed. This section is REQUIRED.
 ## Outstanding
 (Optional — omit the heading if nothing is open.) EVERY item still open after this stretch,
 so this list alone is the current state:
-- carry forward each earlier open item that is still open, in its own words;
+- carry forward each earlier open item that is still open, keeping its wording exactly;
 - add new open items;
-- for each earlier item this stretch resolved, write `✓ closed: <item> — <how>`;
+- for each earlier item this stretch resolved, write `✓ closed: <the item's exact wording> — <how>`;
 - start an item with `**You:**` when it's for the person, not the agent: something
   they said they would check, verify, decide or do themselves.
 

@@ -253,8 +253,12 @@ def latest_outstanding(body: str) -> list:
             if _UPDATE.match(sec) and not m:
                 return []  # newest update says nothing is open
             if m:
+                # Closed = the line STARTS with ✓ closed. An open item may quote
+                # the marker (found by the 2026-11-03 grader: "Check the next update
+                # for `✓ closed:` lines" was hidden from session start).
                 return [l.rstrip() for l in m.group(1).splitlines()
-                        if l.strip().startswith(("-", "*")) and "✓ closed" not in l]
+                        if l.strip().startswith(("-", "*"))
+                        and not l.strip().lstrip("-* ").startswith("✓ closed")]
     return []
 
 

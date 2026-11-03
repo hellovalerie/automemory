@@ -390,6 +390,30 @@ def split_turns(text: str) -> list:
     return chunks
 
 
+def _norm_item(line: str) -> str:
+    """Comparable form of an Outstanding bullet: no bullet, markup or case."""
+    t = re.sub(r"[*`_]", "", line.strip().lstrip("-* ")).lower()
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _words(line: str) -> set:
+    return {w for w in re.findall(r"[a-z0-9]+", _norm_item(line)) if len(w) > 2}
+
+
+def dropped_items(given: list, returned: str) -> list:
+    """Open items handed to the scribe that came back neither carried forward nor
+    closed. Match = at least half of the given item's words appear in one returned bullet (carried
+    or `✓ closed:`), which tolerates rewording; an unmatched item counts as
+    dropped — so the measure can over-count, never silently under-count."""
+    back = [_words(l) for l in (returned or "").splitlines() if l.strip().startswith(("-", "*"))]
+    out = []
+    for g in given:
+        gw = _words(g)
+        if gw and not any(len(gw & b) / len(gw) >= 0.5 for b in back if b):
+            out.append(g)
+    return out
+
+
 def find_pending(source: _Source, records_dir: Path, cwd: str, current_session: str):
     """Sessions with turns nobody has looked at yet, newest-first, as
     (ref, covered) — covered = turns already handled (by a record or a decline),
@@ -470,7 +494,8 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
         # to the scribe spreads (measured 2026-11-03 — a never-closed "not built"
         # item was merged with new turns into a false claim).
         _, prior = record._split(existing.read_text(encoding="utf-8"))
-        open_items = "\n".join(record.latest_outstanding(prior)) or "(none)"
+        given_items = record.latest_outstanding(prior)
+        open_items = "\n".join(given_items) or "(none)"
         text = "".join(turns[covered:])
         instruction = (prompt + _CONTINUE
                        + f"\n\n--- BEGIN OPEN ITEMS ---\n{open_items}\n--- END OPEN ITEMS ---")
@@ -527,7 +552,9 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
             outstanding=secs.get("Outstanding", ""), summary=secs.get("Summary", ""),
             bugs=secs.get("Bugs & Fixes", ""))
         status = "updated" if verdict == "ok" else "no-record"
-        return {"uuid": ref, "status": status, "cost": result.cost_usd, "path": str(path)}
+        dropped = dropped_items(given_items, secs.get("Outstanding", "")) if verdict == "ok" else []
+        return {"uuid": ref, "status": status, "cost": result.cost_usd, "path": str(path),
+                "given": len(given_items), "dropped": dropped}
 
     if verdict == "norecord":
         record.mark_declined(records_dir, ref, total)
@@ -591,7 +618,12 @@ def handover_text(records_dir: Path) -> str:
     idx = Path(records_dir) / record.INDEX_NAME
     if not idx.exists():
         return ""
-    return ("=== automemory: session map ===\n"
+    busy = ""
+    if (Path(records_dir) / ".run.lock").exists():
+        # E.g. exit then an immediate resume: the end-of-session run is still writing
+        # (measured 2026-11-03 — the map showed 45 turns while 46–49 were being added).
+        busy = "(a recording run is in progress — this map may be a minute behind)\n"
+    return ("=== automemory: session map ===\n" + busy
             + idx.read_text(encoding="utf-8").rstrip() + "\n\n"
             + open_items_text(records_dir))
 
@@ -749,6 +781,13 @@ def run(payload: dict, *, provider: str = None, claude_projects_root=None,
         # ALWAYS report, even when nothing was written: a run that checked sessions and
         # declined them all must not look the same as a run that never happened (#5).
         out.write(_summary_line(outcomes, total_cost) + "\n")
+        for o in outcomes:
+            if o.get("dropped"):
+                # Measured, not fixed (grader 2026-11-03): how often does the scribe
+                # lose an open item it was given? Decide on a fix once there's a rate.
+                out.write(f"automemory:   {len(o['dropped'])} of {o['given']} open items "
+                          f"neither carried forward nor closed: "
+                          + " | ".join(d.strip()[:80] for d in o["dropped"]) + "\n")
         for o in outcomes:
             if o["status"] in ("dispatch-error", "malformed"):
                 out.write(f"automemory:   {o['status']} {o.get('provider', '')}:{o['uuid']}"
