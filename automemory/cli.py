@@ -112,6 +112,43 @@ def wire_hook(project: Path, command: str) -> str:
     return "updated" if replaced else "wired"
 
 
+CODEX_HOOKS = Path(".codex") / "hooks.json"
+
+
+def wire_codex_hooks(project: Path) -> str:
+    """Merge our start + end hooks into the project's .codex/hooks.json (Codex's hooks
+    feature; format as described by codex-cli 0.166.0's own schema — SessionStart may
+    return hookSpecificOutput.additionalContext). Codex asks the user to TRUST new hooks
+    the first time it opens the project; until then they don't run. Our own older
+    entries are replaced; others are kept. 'wired' | 'updated' | 'already-wired'."""
+    path = project / CODEX_HOOKS
+    data = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            raise ValueError(f"{path} is not valid JSON — refusing to touch it ({e})")
+    hooks = data.setdefault("hooks", {})
+    engine = " ".join(engine_command())
+    want = {ev: f"{engine} hook --codex --event {ev}" for ev in HOOK_EVENTS}
+    if all(any(h.get("command") == want[ev] for e in hooks.get(ev, []) for h in e.get("hooks", []))
+           for ev in HOOK_EVENTS):
+        return "already-wired"
+    replaced = False
+    for ev in HOOK_EVENTS:
+        kept = []
+        for e in hooks.get(ev, []):
+            hs = [h for h in e.get("hooks", []) if "automemory" not in h.get("command", "") or " hook" not in h.get("command", "")]
+            replaced |= len(hs) != len(e.get("hooks", []))
+            if hs:
+                kept.append(dict(e, hooks=hs))
+        kept.append({"hooks": [{"type": "command", "command": want[ev]}]})
+        hooks[ev] = kept
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return "updated" if replaced else "wired"
+
+
 def scaffold_records(project: Path) -> Path:
     d = project / "agent-records"
     d.mkdir(exist_ok=True)
@@ -339,12 +376,106 @@ def cmd_ignore(args) -> int:
     return 0
 
 
+def cmd_doctor(_args) -> int:
+    """Write one debug file for THIS project — versions, wiring, pending work, its recent
+    runs, usage — for an engine-dev session to start from. No transcript text and no
+    record content; home paths shown as ~. (Owner, 2026-11-04: debugging a project from
+    the engine side needs one bundle, not five scattered logs.)"""
+    import subprocess
+    from datetime import datetime, timezone
+    project = Path.cwd().resolve()
+    H = str(Path.home())
+    tilde = lambda x: str(x).replace(H, "~")
+    recs = reconcile.records_dir_for(str(project))
+    L = [f"# automemory doctor — {project.name}", "",
+         f"Generated {datetime.now(timezone.utc).isoformat(timespec='seconds')} in `{tilde(project)}`. "
+         "No transcript text or record content is included.", ""]
+    def ver(cmd):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+            return (r.stdout or r.stderr).strip().splitlines()[0][:80] if (r.stdout or r.stderr) else "?"
+        except Exception as e:
+            return f"not available ({type(e).__name__})"
+    eng = Path(__file__).resolve().parents[1]
+    L += ["## Versions", f"- engine: `{tilde(eng)}` at "
+          f"`{ver(['git', '-C', str(eng), 'rev-parse', '--short', 'HEAD'])}`",
+          f"- python: `{sys.version.split()[0]}`"]
+    for t in ("claude", "opencode", "codex"):
+        L.append(f"- {t}: {ver([t, '--version']) if shutil.which(t) else 'not installed'}")
+    L += ["", "## Wiring"]
+    cs = project / ".claude" / SETTINGS_FILE
+    L.append(f"- Claude Code hooks (`.claude/{SETTINGS_FILE}`): {'wired' if is_wired(cs) else 'NOT wired'}")
+    cx = project / CODEX_HOOKS
+    cx_ok = cx.exists() and "hook --codex" in cx.read_text(encoding="utf-8", errors="replace")
+    L.append(f"- Codex hooks (`.codex/hooks.json`): {'present' if cx_ok else 'NOT present'} "
+             "(Codex runs them only after you trust them in Codex)")
+    L.append(f"- opencode plugin: {'installed' if OPENCODE_PLUGIN_DEST.exists() else 'not installed'}; "
+             f"consent here: {_consent_state(_consent_load().get(str(project))) or 'none'}")
+    L.append(f"- engine command the hooks run: `{tilde(' '.join(engine_command()))}`")
+    L += ["", "## Records", f"- folder: `{tilde(recs)}` ({'exists' if recs.is_dir() else 'MISSING'})"]
+    if recs.is_dir():
+        files = [p for p in recs.glob("*.md") if p.name not in (record.INDEX_NAME, record.STATUS_NAME)]
+        L.append(f"- records: {len(files)}; newest: "
+                 f"{max(files, key=lambda p: p.stat().st_mtime).name if files else '—'}")
+        items, src, date = record.project_open_list(recs)
+        L.append(f"- open items: {len(items)} (as of {date or '—'}, from {src or '—'})")
+        L.append(f"- ignored sessions: {len(record.ignored_sessions(recs))}; "
+                 f"declined: {len(record._declined_load(recs))}")
+        lock = recs / ".run.lock"
+        if lock.exists():
+            import time as _t
+            L.append(f"- ⚠ run lock present, {int(_t.time() - lock.stat().st_mtime)}s old "
+                     "(stale after 30 min)")
+    L += ["", "## Sessions per tool"]
+    for src_ in (reconcile._ClaudeCodeSource(), reconcile._OpencodeSource(), reconcile._CodexSource()):
+        try:
+            ids = src_.list_ids(str(project))
+            pend = reconcile.find_pending(src_, recs, str(project), "")
+        except Exception as e:
+            L.append(f"- {src_.name}: ERROR {type(e).__name__}: {e}")
+            continue
+        L.append(f"- {src_.name}: {len(ids)} session(s), {len(pend)} with unrecorded turns")
+        for ref, cov in pend[:10]:
+            try:
+                total = len(reconcile.split_turns(src_.render(ref, str(project))))
+            except Exception:
+                total = "?"
+            L.append(f"  - `{record.short(ref)}` covered {cov if cov is not None else 'none'} of {total} turns")
+    L += ["", "## Recent runs for this project (`~/.local/state/automemory/reconcile.log`)", "```"]
+    log = RECONCILE_LOG
+    blocks, cur = [], None
+    if log.exists():
+        for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("=== "):
+                cur = [line] if f"dir={project}" in line or f"dir={tilde(project)}" in line else None
+                if cur is not None:
+                    blocks.append(cur)
+            elif cur is not None:
+                cur.append(line)
+    for b in blocks[-10:]:
+        L += [tilde(x) for x in b]
+    L += ["```" if blocks else "(no runs logged for this folder)", ""] if blocks else ["(no runs logged for this folder)", "```", ""]
+    L += ["## Recent scribe usage (`usage.jsonl`, last 5)", "```"]
+    try:
+        L += reconcile.USAGE_LOG.read_text(encoding="utf-8").splitlines()[-5:]
+    except OSError:
+        L.append("(no usage logged yet)")
+    L += ["```", "", "Bring this file to an engine-dev session to start debugging."]
+    out_dir = Path.home() / ".local" / "state" / "automemory" / "debug"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"{record.slug(project.name)}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.md"
+    out.write_text("\n".join(L) + "\n", encoding="utf-8")
+    print("\n".join(L[:60]))
+    print(f"\nautomemory doctor: wrote {tilde(out)}")
+    return 0
+
+
 def cmd_reconcile(args) -> int:
     return reconcile.main((["--background"] if getattr(args, "background", False) else [])
                           + (["--all"] if getattr(args, "all", False) else []))
 
 
-def cmd_hook(_args) -> int:
+def cmd_hook(args) -> int:
     """Claude Code hook entry. Returns immediately; never blocks the session.
 
     SessionStart: print the map for the agent's context, then start the
@@ -353,12 +484,20 @@ def cmd_hook(_args) -> int:
     last session in a project no longer needs a manual `amlog`."""
     payload = reconcile.read_payload()
     cwd = payload.get("cwd") or os.getcwd()
-    event = payload.get("hook_event_name", "SessionStart")
+    codex = getattr(args, "codex", False)
+    event = getattr(args, "event", None) or payload.get("hook_event_name", "SessionStart")
+    payload.setdefault("hook_event_name", event)
     # AUTOMEMORY_HANDOVER=0 keeps the startup output silent for one session — used
     # by the orientation test's "without records" arm, which must not see the map
     # or open items. Recording itself is unaffected.
     if event == "SessionStart" and os.environ.get("AUTOMEMORY_HANDOVER", "1") != "0":
-        sys.stdout.write(reconcile.handover_text(reconcile.records_dir_for(cwd)))
+        text = reconcile.handover_text(reconcile.records_dir_for(cwd))
+        if codex:
+            # Codex hooks return JSON; additionalContext is added to the session.
+            sys.stdout.write(json.dumps({"hookSpecificOutput": {
+                "hookEventName": "SessionStart", "additionalContext": text}}) + "\n")
+        else:
+            sys.stdout.write(text)
         sys.stdout.flush()
     bg = dict(payload)
     if event == "SessionEnd":
@@ -526,12 +665,12 @@ automemory records your AI coding sessions in this folder.
 """
 
 
-def _ensure_local_ignored(project: Path) -> str:
+def _ensure_local_ignored(project: Path, target: str = "") -> str:
     """Keep the personal hook file out of git via the repo's LOCAL exclude list
     (.git/info/exclude — never committed, affects no one else). '' if not a repo
     or already ignored."""
     import subprocess
-    target = ".claude/" + SETTINGS_FILE
+    target = target or ".claude/" + SETTINGS_FILE
     try:
         r = subprocess.run(["git", "-C", str(project), "check-ignore", "-q", target],
                            capture_output=True)
@@ -546,7 +685,7 @@ def _ensure_local_ignored(project: Path) -> str:
     excl = (project / git_dir.stdout.strip() / "info" / "exclude")
     excl.parent.mkdir(parents=True, exist_ok=True)
     with excl.open("a", encoding="utf-8") as fh:
-        fh.write(f"\n# automemory: personal hook file (machine-specific path)\n{target}\n")
+        fh.write(f"\n# automemory: hook file with this machine's engine path\n{target}\n")
     return str(excl)
 
 
@@ -557,9 +696,9 @@ def cmd_setup(args) -> int:
     if project in (Path.home().resolve(), Path(project.anchor)):
         print("automemory: run this inside a project folder, not your home folder or /.")
         return 1
-    tools = [t for t in ("claude", "opencode") if shutil.which(t)]
+    tools = [t for t in ("claude", "opencode", "codex") if shutil.which(t)]
     if not tools:
-        print("automemory: neither `claude` nor `opencode` is installed — nothing to record.")
+        print("automemory: none of `claude`, `opencode`, `codex` is installed — nothing to record.")
         return 1
     entry = _consent_load().get(str(project))
     if _consent_state(entry) == "on" and not getattr(args, "yes", False):
@@ -594,6 +733,16 @@ def cmd_setup(args) -> int:
             print(f"  Claude Code: NOT wired — {e}")
     if "opencode" in tools:
         print(f"  opencode: plugin {install_opencode_plugin()} (restart opencode to load it)")
+    if "codex" in tools:
+        try:
+            res = wire_codex_hooks(project)
+            print(f"  Codex: start + end hooks {res.replace('-', ' ')} (.codex/hooks.json). The first "
+                  f"time you open Codex here it asks you to TRUST these hooks — approve them.")
+            excl = _ensure_local_ignored(project, ".codex/hooks.json")
+            if excl:
+                print("  git: .codex/hooks.json added to this repo's local ignore list")
+        except ValueError as e:
+            print(f"  Codex: NOT wired — {e}")
     print("\nRecords are written in the background as sessions start and end. "
           "To record right now: automemory reconcile")
     return 0
@@ -613,10 +762,13 @@ def main(argv=None) -> int:
     p_di = sub.add_parser("disable", help="stop recording a project")
     p_di.add_argument("path", nargs="?", help="project dir (default: cwd)")
     sub.add_parser("projects", help="list projects and their recording state")
+    sub.add_parser("doctor", help="write one debug file for this project (for an engine-dev session)")
     p_rc = sub.add_parser("reconcile", help="record every session with new turns (amlog)")
     p_rc.add_argument("--background", action="store_true", help=argparse.SUPPRESS)
     p_rc.add_argument("--all", action="store_true", help="record every waiting session now (no limit)")
-    sub.add_parser("hook", help=argparse.SUPPRESS)  # Claude Code hook entrypoint
+    p_hk = sub.add_parser("hook", help=argparse.SUPPRESS)  # Claude Code / Codex hook entrypoint
+    p_hk.add_argument("--codex", action="store_true", help=argparse.SUPPRESS)
+    p_hk.add_argument("--event", help=argparse.SUPPRESS)
     p_ig = sub.add_parser("ignore", help="never record these sessions (e.g. eval runs)")
     p_ig.add_argument("session", nargs="+", help="session id(s)")
     p_ig.add_argument("--note", help="why (kept as a comment in the list)")
@@ -625,7 +777,7 @@ def main(argv=None) -> int:
         return cmd_setup(args)
     return {
         "init": cmd_init, "status": cmd_status, "peep": cmd_peep, "reconcile": cmd_reconcile,
-        "migrate": cmd_migrate, "hook": cmd_hook, "ignore": cmd_ignore,
+        "migrate": cmd_migrate, "hook": cmd_hook, "ignore": cmd_ignore, "doctor": cmd_doctor,
         "enable": cmd_enable, "disable": cmd_disable, "projects": cmd_projects,
     }[args.cmd](args)
 

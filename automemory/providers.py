@@ -130,8 +130,11 @@ CODEX = Provider(
     file_tag="codex",
     # None = the session's own model, else the user's Codex default. Never named.
     scribe_model=None,
-    has_lifecycle_hook=False,   # Codex has a hooks feature; not wired yet (manual reconcile)
-    wiring="manual",
+    # Codex hooks (SessionStart/SessionEnd) in the project's .codex/hooks.json, wired by
+    # plain `automemory`; the user TRUSTS them once in Codex. Format per codex's schema,
+    # not yet seen running (untrusted hooks don't run headless) — see #10.
+    has_lifecycle_hook=True,
+    wiring="codex-hooks-file",
     store_kind="jsonl-per-session",
     notes="Store: ~/.codex/sessions/YYYY/MM/DD/rollout-<time>-<uuid>.jsonl (+ archived_sessions/), "
           "one append-only file per session; first line session_meta (cwd, id, source). Codex "
