@@ -34,6 +34,10 @@ Rules:
 - **Write-gate:** if the session produced no concrete Done — pure Q&A, reading, or
   exploration that left no durable result, or work still in progress with no outcome yet — output
   `NO-RECORD: <one short line saying why>` and nothing else.
+  **Settling an open item IS an outcome** — never decline it. If the transcript confirms
+  an item you were given is finished, or only partly done, write a Done line for what was
+  confirmed, then close the item (`✓ closed: …`), or carry it with the same id reworded to
+  what is still left. A short check-in session that only does this still gets an update.
 - Facts only, drawn strictly from the transcript. Do not invent, infer beyond the text, or
   add praise, preamble, or meta-commentary.
 - Say something is unfinished, unbuilt or still open ONLY if the transcript shows it. An

@@ -618,7 +618,9 @@ _CONTINUE = (
     "The items still open before these turns are listed between BEGIN/END OPEN ITEMS: "
     "in `## Outstanding`, close each one these turns resolved (`✓ closed: <item> — "
     "<how>`), carry forward each one they don't mention, and add new ones. Same "
-    "write-gate: if the new turns produced nothing durable, output exactly NO-RECORD."
+    "write-gate: if the new turns produced nothing durable, output exactly NO-RECORD. "
+    "Confirming an open item finished or only partly done IS durable: record it, never "
+    "decline it."
 )
 
 
@@ -730,7 +732,12 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
 
     if existing is not None:
         # Continue in place. A declined stretch adds no block but still advances
-        # `turns` and records any title/model/filename change.
+        # `turns` and records any title/model/filename change — and WHY it was declined,
+        # in `## Changes` (found 2026-11-04: a declined check-in left no trace).
+        reason = ""
+        if verdict == "norecord":
+            reason = result.text.strip()[len("NO-RECORD"):].lstrip(" :—-").strip()
+            reason = redact.redact(reason.splitlines()[0] if reason else "")[0][:200]
         path = record.append_update(
             existing, turns_from=covered + 1, turns_to=total, seen_chars=len(full),
             title=meta["title"], custom_title=meta.get("custom_title", ""),
@@ -738,10 +745,12 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
             provider_tag=tag, session_ref=ref, date=meta.get("last_active", ""),
             done=secs.get("Done", ""), learnings=secs.get("Learnings & Gotchas", ""),
             outstanding=secs.get("Outstanding", ""), summary=secs.get("Summary", ""),
-            bugs=secs.get("Bugs & Fixes", ""), scribe=scribe)
+            bugs=secs.get("Bugs & Fixes", ""), scribe=scribe,
+            declined=verdict == "norecord", declined_reason=reason)
         status = "updated" if verdict == "ok" else "no-record"
         return {"uuid": ref, "status": status, "cost": result.cost_usd, "path": str(path),
-                "given": len(given_items), "dropped": dropped, "scribe": scribe}
+                "given": len(given_items), "dropped": dropped, "scribe": scribe,
+                "reason": reason}
 
     if verdict == "norecord":
         reason = result.text.strip()[len("NO-RECORD"):].lstrip(" :—-").strip()

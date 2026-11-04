@@ -402,7 +402,8 @@ def append_update(path, *, turns_from: int, turns_to: int, title: str, seen_char
                   custom_title: str = "", model: str, last_active: str,
                   provider_tag: str, session_ref: str, done: str = "",
                   learnings: str = "", outstanding: str = "", date: str = "",
-                  summary: str = "", bugs: str = "", captured: str = "", scribe: str = "") -> Path:
+                  summary: str = "", bugs: str = "", captured: str = "", scribe: str = "",
+                  declined: bool = False, declined_reason: str = "") -> Path:
     """Continue a record exactly where it left off.
 
     - A dated `## Update — <date> · turns A–B` block, only if the scribe found
@@ -425,6 +426,10 @@ def append_update(path, *, turns_from: int, turns_to: int, title: str, seen_char
         fm["list_written"] = captured or now_iso()  # this update now holds the project's list
 
     changes = []
+    if declined and not (done and done.strip()):
+        changes.append(f"{date} · turns {turns_from}–{turns_to}: no update — declined"
+                       + (f" by scribe {scribe}" if scribe else "")
+                       + (f": {declined_reason}" if declined_reason else ""))
     if title and title != fm.get("title"):
         changes.append(f'{date} · title: "{fm.get("title", "")}" → "{title}"')
         fm["title"] = title
@@ -448,6 +453,34 @@ def append_update(path, *, turns_from: int, turns_to: int, title: str, seen_char
     if want != path.name:
         path = _guarded_rename(path, path.parent / want)
     return path
+
+
+_UPDATE_SPAN = re.compile(r"^## Update — .*?turns \d+[–-](\d+)", re.M)
+
+
+def recheck(path, date: str = ""):
+    """Hand the turns after the newest update back to the scribe on the next run — for
+    a stretch it declined that should have been recorded (2026-11-04: a check-in that
+    settled two open items was declined). Only the frontmatter moves; it never goes
+    below the newest update, so nothing already written is re-written. Logged in
+    `## Changes`. Returns (from, to) re-opened, or None if there was nothing to re-open."""
+    path = Path(path)
+    date = date or today()
+    fm, body = _split(path.read_text(encoding="utf-8"))
+    ends = [int(b) for b in _UPDATE_SPAN.findall(body)]
+    try:
+        turns = int(fm.get("turns") or 0)
+    except ValueError:
+        return None
+    if not ends or turns <= max(ends):
+        return None
+    last = max(ends)
+    body = _add_changes(body, [f"{date} · turns {last + 1}–{turns}: re-opened for the "
+                               f"scribe (`automemory recheck`)"])
+    fm["turns"] = last
+    fm["seen_chars"] = ""
+    _guarded_write(path, _fm_dump(fm) + "\n" + body)
+    return last + 1, turns
 
 
 # --- snapshot (`protect`): a read-only copy before any format change ----------

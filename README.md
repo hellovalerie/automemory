@@ -150,6 +150,7 @@ automemory status               # how many records, the latest one, whether reco
 automemory peep                 # print the index
 automemory reconcile --all      # record everything waiting, without asking
 automemory ignore <session-id>  # never record this session (e.g. a throwaway or a test)
+automemory recheck <session-id> # re-read turns the scribe declined, on the next reconcile
 automemory disable              # stop recording this folder (opencode)
 automemory projects             # which folders are on or off
 ```
@@ -312,6 +313,13 @@ So it isn't asked again every time, a declined session is noted in
 grows — you come back and do real work, or a task that was still running when it was
 checked finishes later — it's checked again, and gets a record then. Running a check while
 the agent is mid-task is the most common reason for a decline.
+
+Confirming that an open item is finished, or only partly done, counts as an outcome — a
+short check-in like "is [o3] done?" gets an update that closes or rewords the item. If a
+session that already has a record is declined anyway, the reason goes in that record's
+`## Changes`. If you think the scribe got it wrong, `automemory recheck <session-id>` (the
+short id or the record's file name work too) hands those turns back to it on the next run;
+nothing already written changes.
 
 ## Things worth knowing
 

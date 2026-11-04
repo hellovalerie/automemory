@@ -376,6 +376,33 @@ def cmd_ignore(args) -> int:
     return 0
 
 
+def cmd_recheck(args) -> int:
+    """Give a session's declined turns (those after its newest update) back to the
+    scribe; the next `reconcile` reads them again. Takes a session id, its short id,
+    or the record's file name."""
+    recs = reconcile.records_dir_for(str(Path.cwd()))
+    rc = 0
+    for want in args.session:
+        hit = None
+        for p in sorted(Path(recs).glob("*.md")):
+            src = record._fm_parse(p.read_text(encoding="utf-8")).get("source", "")
+            ref = src.split(":", 1)[-1]
+            if want in (ref, record.short(ref), p.name, p.stem) or (len(want) >= 8 and ref.endswith(want)):
+                hit = p
+                break
+        if hit is None:
+            print(f"automemory: no record for {want}")
+            rc = 1
+            continue
+        span = record.recheck(hit)
+        if span:
+            print(f"automemory: {hit.name} — turns {span[0]}–{span[1]} will be read again "
+                  f"on the next `automemory reconcile`")
+        else:
+            print(f"automemory: {hit.name} — nothing to re-check (no turns past its newest update)")
+    return rc
+
+
 def cmd_doctor(_args) -> int:
     """Write one debug file for THIS project — versions, wiring, pending work, its recent
     runs, usage — for an engine-dev session to start from. No transcript text and no
@@ -775,12 +802,15 @@ def main(argv=None) -> int:
     p_ig = sub.add_parser("ignore", help="never record these sessions (e.g. eval runs)")
     p_ig.add_argument("session", nargs="+", help="session id(s)")
     p_ig.add_argument("--note", help="why (kept as a comment in the list)")
+    p_re = sub.add_parser("recheck", help="re-read a session's declined turns on the next run")
+    p_re.add_argument("session", nargs="+", help="session id, short id, or record file name")
     args = p.parse_args(argv)
     if args.cmd is None:
         return cmd_setup(args)
     return {
         "init": cmd_init, "status": cmd_status, "peep": cmd_peep, "reconcile": cmd_reconcile,
         "migrate": cmd_migrate, "hook": cmd_hook, "ignore": cmd_ignore, "doctor": cmd_doctor,
+        "recheck": cmd_recheck,
         "enable": cmd_enable, "disable": cmd_disable, "projects": cmd_projects,
     }[args.cmd](args)
 
