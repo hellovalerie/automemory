@@ -655,7 +655,7 @@ def cmd_projects(_args) -> int:
 _CONSENT_TEXT = """\
 automemory records your AI coding sessions in this folder.
 
-  - It reads the transcripts your tools already keep (Claude Code, opencode)
+  - It reads the transcripts your tools already keep (Claude Code, Codex, opencode)
     for sessions run in this folder. It never copies or moves them.
   - A separate model call (the "scribe") writes a short record of each session
     into ./agent-records/. Secrets it recognises are scrubbed first.
