@@ -123,7 +123,25 @@ OPENCODE = Provider(
           "the same gap ENGINE-A.md already records for Claude Code.",
 )
 
-_ALL = (CLAUDE_CODE, OPENCODE)
+CODEX = Provider(
+    name="codex",
+    aliases=("codex-cli", "openai-codex"),
+    cli="codex",
+    file_tag="codex",
+    # None = the session's own model, else the user's Codex default. Never named.
+    scribe_model=None,
+    has_lifecycle_hook=False,   # Codex has a hooks feature; not wired yet (manual reconcile)
+    wiring="manual",
+    store_kind="jsonl-per-session",
+    notes="Store: ~/.codex/sessions/YYYY/MM/DD/rollout-<time>-<uuid>.jsonl (+ archived_sessions/), "
+          "one append-only file per session; first line session_meta (cwd, id, source). Codex "
+          "injects a <environment_context> 'user' message and 'developer' messages — not the "
+          "person's turns. Scribe: `codex exec --ephemeral --ignore-user-config -s read-only` "
+          "with shell/exec/apps/plugins/browser/computer-use disabled — proven blind by a canary "
+          "(and the control without the disables DID read it), 2026-11-04.",
+)
+
+_ALL = (CLAUDE_CODE, OPENCODE, CODEX)
 
 _BY_NAME: dict = {}
 for _p in _ALL:

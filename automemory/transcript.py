@@ -589,6 +589,120 @@ def opencode_session_model_ref(session_id: str, db=None) -> str:
         con.close()
 
 
+# --- Codex ------------------------------------------------------------------------
+# Measured on codex-cli 0.166.0 (2026-11-03/04). One append-only JSONL per session.
+
+def _codex_home(home=None) -> Path:
+    import os
+    return Path(home or os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+
+
+# Codex's own injected "user" messages — context, not the person's words.
+_CODEX_INJECTED = ("<environment_context", "<user_instructions", "<instructions", "<INSTRUCTIONS",
+                   "# AGENTS.md instructions", "<user_shell_command")
+
+
+def _codex_meta_line(path: Path) -> dict:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            first = json.loads(fh.readline())
+        return first.get("payload") or {} if first.get("type") == "session_meta" else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def codex_session_files(cwd: str, home=None) -> dict:
+    """{session id: transcript path} for Codex sessions run in `cwd` — the person's own
+    sessions only (subagent sessions excluded) — newest first by modification time."""
+    import os
+    root = _codex_home(home)
+    want = os.path.realpath(cwd)
+    found = []
+    for sub in ("sessions", "archived_sessions"):
+        for p in (root / sub).rglob("*.jsonl") if (root / sub).is_dir() else []:
+            m = _codex_meta_line(p)
+            if not m or os.path.realpath(m.get("cwd") or "") != want:
+                continue
+            src = m.get("source")
+            if isinstance(src, dict) and "subagent" in src:
+                continue
+            sid = m.get("id") or m.get("session_id")
+            if sid:
+                found.append((p.stat().st_mtime, sid, p))
+    found.sort(reverse=True)
+    return {sid: p for _, sid, p in found}
+
+
+def _codex_items(path: Path):
+    """(timestamp, role, text|None, tool name|None) for the person's turns, the agent's
+    replies and tool calls — skipping developer messages and Codex's injected context."""
+    try:
+        fh = open(path, encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    with fh:
+        for line in fh:
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if r.get("type") != "response_item":
+                continue
+            p = r.get("payload") or {}
+            t = p.get("type")
+            if t == "message" and p.get("role") in ("user", "assistant"):
+                text = "\n".join(c.get("text") or "" for c in p.get("content") or []
+                                 if c.get("type") in ("input_text", "output_text", "text")).strip()
+                if not text or (p["role"] == "user" and text.lstrip().startswith(_CODEX_INJECTED)):
+                    continue
+                yield r.get("timestamp", ""), p["role"], text, None
+            elif t in ("function_call", "custom_tool_call", "local_shell_call"):
+                yield r.get("timestamp", ""), "tool", None, p.get("name") or t
+
+
+def render_codex_session(path) -> str:
+    out = []
+    for _, role, text, tool in _codex_items(Path(path)):
+        out.append(f"[TOOL {tool}]\n\n" if role == "tool" else f"### {role}\n\n{text}\n\n")
+    return "".join(out)
+
+
+def codex_session_meta(path, home=None) -> dict:
+    path = Path(path)
+    m = _codex_meta_line(path)
+    tss, model = [], ""
+    try:
+        for line in open(path, encoding="utf-8", errors="replace"):
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if r.get("timestamp"):
+                tss.append(r["timestamp"])
+            if r.get("type") == "turn_context":
+                model = (r.get("payload") or {}).get("model") or model   # LAST used wins
+    except OSError:
+        pass
+    sid = m.get("id") or path.stem
+    title = ""
+    try:
+        for line in (_codex_home(home) / "session_index.jsonl").read_text(encoding="utf-8").splitlines():
+            e = json.loads(line)
+            if e.get("id") == sid and e.get("thread_name"):
+                title = e["thread_name"]   # the latest entry wins (a rename appends)
+    except (OSError, ValueError):
+        pass
+    if not title:
+        first = next((t for _, role, t, _ in _codex_items(path) if role == "user"), "")
+        title = " ".join(first.split()[:8]) or f"session {sid[:8]}"
+    started = min(tss) if tss else ""
+    return {"occurred": started[:10] or "0000-00-00", "last_active": (max(tss) if tss else "")[:10],
+            "started_ts": started, "title": title[:120],
+            # Codex's thread_name can't yet be told apart from an auto-title, so files
+            # are named by session id (see #10).
+            "custom_title": "", "model": model}
+
+
 if __name__ == "__main__":
     src = sys.argv[1] if len(sys.argv) > 1 else "/dev/stdin"
     sys.stdout.write(render_file(src))

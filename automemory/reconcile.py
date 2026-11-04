@@ -319,6 +319,55 @@ class _OpencodeSource(_Source):
                 pass
 
 
+class _CodexSource(_Source):
+    """Codex: one JSONL per session under ~/.codex/sessions/ (and archived_sessions/),
+    scoped by the session's recorded cwd."""
+
+    name = "codex"
+
+    def __init__(self, home=None):
+        self.home = home
+        self._files = {}
+
+    def _path(self, ref, cwd=None):
+        if ref not in self._files and cwd:
+            self._files.update(transcript.codex_session_files(cwd, home=self.home))
+        return self._files.get(ref)
+
+    def list_ids(self, cwd: str) -> list:
+        self._files = transcript.codex_session_files(cwd, home=self.home)
+        return list(self._files)
+
+    def render(self, ref: str, cwd: str = None) -> str:
+        p = self._path(ref, cwd)
+        return transcript.render_codex_session(p) if p else ""
+
+    def meta(self, ref: str, cwd: str = None) -> dict:
+        p = self._path(ref, cwd)
+        return transcript.codex_session_meta(p, home=self.home) if p else {
+            "occurred": "0000-00-00", "last_active": "", "title": f"session {ref[:8]}",
+            "custom_title": "", "model": ""}
+
+    def is_scribe(self, ref: str, cwd: str = None) -> bool:
+        # The scribe runs --ephemeral, so its sessions are never stored; this is the
+        # belt to that brace.
+        first = next((t for _, role, t, _ in transcript._codex_items(self._path(ref, cwd) or Path("/nonexistent"))
+                      if role == "user"), "")
+        return dispatch.SCRIBE_SENTINEL in first
+
+    def has_content(self, ref: str, cwd: str = None) -> bool:
+        return any(role == "user" for _, role, _, _ in
+                   transcript._codex_items(self._path(ref, cwd) or Path("/nonexistent")))
+
+    def scribe_models(self, ref: str, cwd: str = None) -> list:
+        """Configured model, then the session's own last model, then Codex's default."""
+        out = []
+        for m in (dispatch.default_model(self.name), self.meta(ref, cwd).get("model")):
+            if m and m not in out:
+                out.append(m)
+        return out + [None]
+
+
 def resolve_source(cwd: str, provider: str = None, **kw) -> _Source:
     """Pick a provider adapter. Explicit provider > AUTOMEMORY_PROVIDER >
     auto-detect (whichever store actually has sessions for this cwd)."""
@@ -332,6 +381,8 @@ def resolve_source(cwd: str, provider: str = None, **kw) -> _Source:
             return _ClaudeCodeSource(projects_root=kw.get("claude_projects_root"))
         if p.name == "opencode":
             return _OpencodeSource(db=kw.get("opencode_db"))
+        if p.name == "codex":
+            return _CodexSource(home=kw.get("codex_home"))
 
     oc = _OpencodeSource(db=kw.get("opencode_db"))
     if oc.list_ids(cwd):
@@ -353,7 +404,8 @@ def resolve_sources(cwd: str, provider: str = None, **kw) -> list:
     if provider or os.environ.get(PROVIDER_ENV):
         return [resolve_source(cwd, provider=provider, **kw)]
     found = [s for s in (_ClaudeCodeSource(projects_root=kw.get("claude_projects_root")),
-                         _OpencodeSource(db=kw.get("opencode_db")))
+                         _OpencodeSource(db=kw.get("opencode_db")),
+                         _CodexSource(home=kw.get("codex_home")))
              if s.list_ids(cwd)]
     return found or [_ClaudeCodeSource(projects_root=kw.get("claude_projects_root"))]
 

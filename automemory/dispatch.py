@@ -333,7 +333,50 @@ def author_opencode(
 
 # Dispatch table: reconcile picks by provider name. The model each one uses comes
 # from providers.py so there is exactly one place provider config is declared.
-DISPATCHERS = {"claude-code": author, "opencode": author_opencode}
+# Blindness measured 2026-11-04 with a canary file: with these disabled the scribe
+# answered NO-ACCESS; the control run WITHOUT them read the canary (the read-only
+# sandbox only blocks writes). Keep every one.
+_CODEX_BLIND = ("shell_tool", "unified_exec", "apps", "plugins", "browser_use", "computer_use")
+
+
+def author_codex(transcript_text: str, instruction: str, *, model: str = None,
+                 cli: str = "codex", timeout_s: int = 300) -> DispatchResult:
+    """Headless authoring via `codex exec`. Same contract as `author()`; never raises.
+    --ephemeral: the scribe's run is never saved to the user's Codex history.
+    --ignore-user-config: no user hooks/notify fire for it; auth still uses CODEX_HOME."""
+    import re as _re
+    prompt = (f"[{SCRIBE_SENTINEL} — engine plumbing, not part of any record]\n\n"
+              f"{instruction}\n\n{_FRAMING}\n\n"
+              f"--- BEGIN TRANSCRIPT ---\n{_fit(transcript_text)}\n--- END TRANSCRIPT ---")
+    with tempfile.TemporaryDirectory() as neutral:
+        last = Path(neutral) / "last.txt"
+        cmd = [cli, "exec", "--ephemeral", "--ignore-user-config", "--skip-git-repo-check",
+               "-s", "read-only", "-o", str(last)]
+        for f in _CODEX_BLIND:
+            cmd += ["--disable", f]
+        if model:
+            cmd += ["-m", model]
+        cmd.append("-")  # prompt on stdin
+        env = dict(os.environ, AUTOMEMORY_SCRIBE="1")
+        try:
+            proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
+                                  cwd=neutral, timeout=timeout_s, env=env)
+        except FileNotFoundError:
+            return DispatchResult(is_error=True, error=f"{cli} not found on PATH")
+        except subprocess.TimeoutExpired:
+            return DispatchResult(is_error=True, error=f"dispatch timed out after {timeout_s}s")
+        text = last.read_text(encoding="utf-8").strip() if last.exists() else ""
+    m = _re.search(r"tokens used\s*\n?\s*([\d,]+)", proc.stdout + proc.stderr)
+    usage = {"input_tokens": int(m.group(1).replace(",", ""))} if m else {}
+    if proc.returncode != 0 or not text:
+        tail = (proc.stderr or proc.stdout).strip()[-300:]
+        return DispatchResult(is_error=True, error=f"exit {proc.returncode}: {tail}",
+                              usage=usage, model=model or "")
+    # Codex doesn't report a dollar cost; tokens are logged, cost stays unknown.
+    return DispatchResult(text=text, usage=usage, model=model or "")
+
+
+DISPATCHERS = {"claude-code": author, "opencode": author_opencode, "codex": author_codex}
 
 
 def default_model(provider: str, fallback: str = None):
