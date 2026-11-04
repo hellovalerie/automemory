@@ -668,8 +668,11 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
         # back open or closed — any the scribe left out is carried forward, marked.
         secs["Outstanding"], dropped, _ = record.settle_outstanding(
             given_items, secs.get("Outstanding", ""), next_id)
-    meta = dict(meta, title=redact.redact(meta.get("title", ""))[0],
-                custom_title=redact.redact(meta.get("custom_title", ""))[0])
+    # Titles often come from the first message, which can hold full paths — never put
+    # the home folder (a username) into a record (found 2026-11-05 in a Codex title).
+    home = str(Path.home())
+    meta = dict(meta, title=redact.redact(meta.get("title", ""))[0].replace(home, "~"),
+                custom_title=redact.redact(meta.get("custom_title", ""))[0].replace(home, "~"))
 
     if existing is not None:
         # Continue in place. A declined stretch adds no block but still advances
