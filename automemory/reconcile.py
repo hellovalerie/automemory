@@ -383,6 +383,70 @@ def split_turns(text: str) -> list:
     return chunks
 
 
+# --- usage: what scribe calls actually cost YOU (learned, never a price table) ----
+# Prices change and differ per account and model; a hardcoded table would rot like the
+# hardcoded model names did. Every scribe call already reports its cost and tokens, so
+# log them, and estimate a backlog from the user's own history.
+USAGE_LOG = Path(os.environ.get("AUTOMEMORY_USAGE_LOG")
+                 or (Path.home() / ".local" / "state" / "automemory" / "usage.jsonl"))
+CHARS_PER_TOKEN = 4  # rough rule of thumb for English text + code; refined by the log
+
+
+def log_usage(provider: str, model, chars_in: int, result) -> None:
+    try:
+        USAGE_LOG.parent.mkdir(parents=True, exist_ok=True)
+        u = result.usage or {}
+        tok_in = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens",
+                                                   "cache_creation_input_tokens", "input"))
+        tok_out = int(u.get("output_tokens") or u.get("output") or 0)
+        with USAGE_LOG.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"ts": record.now_iso(), "provider": provider,
+                                 "model": result.model or (model if isinstance(model, str) else ""),
+                                 "chars_in": chars_in, "tokens_in": tok_in, "tokens_out": tok_out,
+                                 "cost_usd": round(float(result.cost_usd or 0), 6)}) + "\n")
+    except Exception:
+        pass  # usage logging must never break recording
+
+
+def _usage_rates(provider: str, last: int = 50):
+    """(cost per char, tokens per char, n) from the user's own recent calls, or None."""
+    try:
+        rows = [json.loads(l) for l in USAGE_LOG.read_text(encoding="utf-8").splitlines() if l.strip()]
+    except (OSError, ValueError):
+        return None
+    rows = [r for r in rows if r.get("provider") == provider and r.get("chars_in")][-last:]
+    if not rows:
+        return None
+    chars = sum(r["chars_in"] for r in rows)
+    cost = sum(r.get("cost_usd") or 0 for r in rows)
+    toks = sum((r.get("tokens_in") or 0) + (r.get("tokens_out") or 0) for r in rows)
+    return (cost / chars if cost else None, toks / chars if toks else None, len(rows))
+
+
+def backlog_estimate(pending: list, records_dir, cwd: str) -> str:
+    """One line for the backlog question: tokens, and cost from the user's history."""
+    per = {}
+    for src, ref, cov in pending:
+        try:
+            turns = split_turns(src.render(ref, cwd))
+        except Exception:
+            continue
+        has_rec = cov is not None and record.find_record(records_dir, ref) is not None
+        per[src.name] = per.get(src.name, 0) + len("".join(turns[cov:] if has_rec else turns))
+    parts, total_cost, known = [], 0.0, True
+    for prov, chars in per.items():
+        rates = _usage_rates(prov)
+        tpc = (rates[1] if rates and rates[1] else 1 / CHARS_PER_TOKEN)
+        parts.append(f"~{int(chars * tpc / 1000)}k tokens ({prov})")
+        if rates and rates[0]:
+            total_cost += chars * rates[0]
+        else:
+            known = False
+    cost = (f"about ${total_cost:.2f}, judging by your recent runs" if known and total_cost
+            else "cost not known yet — it's learned from your first few runs")
+    return f"{', '.join(parts) or 'nothing to send'}; {cost}"
+
+
 def _pending_order_key(src, ref: str, cov, records_dir, cwd) -> str:
     """When the uncovered work began, as a sortable string: a continued session's new
     stretch began after its record was last captured; a new session at its start.
@@ -496,6 +560,7 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
     else:
         text, instruction = full, prompt + (_PROJECT_LIST + open_block if given_items else "")
     scrubbed, _ = redact.redact(text)
+    chars_in = len(scrubbed) + len(instruction)
 
     result = None
     # Two distinct retries, because two distinct failures:
@@ -510,6 +575,8 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
     verdict = "bad"
     for _ in (1, 2):  # author, retry once on malformed
         result = call()
+        if not result.is_error:
+            log_usage(source.name, model, chars_in, result)
         while result.is_error and dispatch_tries < max_dispatch_tries:
             if any(p in result.error.lower() for p in _PERMANENT):
                 break
@@ -727,10 +794,11 @@ def run(payload: dict, *, provider: str = None, claude_projects_root=None,
             if all_pending:
                 cap = len(missing)
             else:
+                with progress.Spinner("estimating"):
+                    est = backlog_estimate(missing, records_dir, cwd)
                 sys.stderr.write(
                     f"\nautomemory: {len(missing)} sessions are waiting to be recorded "
-                    f"(oldest first). Each is one small model call — roughly a minute and a "
-                    f"few cents each.\n")
+                    f"(oldest first): {est}. One model call each, roughly a minute apiece.\n")
                 try:
                     ans = input(f"Record all {len(missing)} now? [y/N] (N records the oldest {cap}) ")
                 except EOFError:
