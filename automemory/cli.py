@@ -340,7 +340,8 @@ def cmd_ignore(args) -> int:
 
 
 def cmd_reconcile(args) -> int:
-    return reconcile.main(["--background"] if getattr(args, "background", False) else [])
+    return reconcile.main((["--background"] if getattr(args, "background", False) else [])
+                          + (["--all"] if getattr(args, "all", False) else []))
 
 
 def cmd_hook(_args) -> int:
@@ -614,6 +615,7 @@ def main(argv=None) -> int:
     sub.add_parser("projects", help="list projects and their recording state")
     p_rc = sub.add_parser("reconcile", help="record every session with new turns (amlog)")
     p_rc.add_argument("--background", action="store_true", help=argparse.SUPPRESS)
+    p_rc.add_argument("--all", action="store_true", help="record every waiting session now (no limit)")
     sub.add_parser("hook", help=argparse.SUPPRESS)  # Claude Code hook entrypoint
     p_ig = sub.add_parser("ignore", help="never record these sessions (e.g. eval runs)")
     p_ig.add_argument("session", nargs="+", help="session id(s)")

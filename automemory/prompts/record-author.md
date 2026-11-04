@@ -19,12 +19,14 @@ REQUIRED.
 (Optional — omit the heading if empty.) Traps found, non-obvious things now known.
 
 ## Outstanding
-(Optional — omit the heading if nothing is open.) EVERY item still open after this stretch,
-so this list alone is the current state:
-- carry forward each earlier open item that is still open, keeping its wording exactly;
+(Optional — omit the heading if nothing is open.) EVERY item still open for the PROJECT after
+this stretch — not just this session's — so this list alone is the current state. Open items
+you're given carry ids like `[o12]`:
+- carry forward each earlier open item that is still open, keeping its id and wording exactly;
 - add new open items — ONE thing per item: split a plan or a numbered list into
   separate items, so each can be carried or closed on its own;
-- for each earlier item this stretch resolved, write `✓ closed: <the item's exact wording> — <how>`;
+- for each earlier item this stretch resolved, write `✓ closed: [oN] <the item's exact wording> — <how>`;
+- write new items WITHOUT an id — ids are added for you;
 - start an item with `**You:**` when it's for the person, not the agent: something
   they said they would check, verify, decide or do themselves.
 

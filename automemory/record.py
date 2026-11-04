@@ -66,7 +66,7 @@ def today() -> str:
 # STATE of the session (latest title, last-used model); history of how it got
 # there lives in the body's `## Changes`.
 _ORDER = (
-    "title", "source", "model", "session_started", "last_active", "turns",
+    "title", "source", "model", "session_started", "last_active", "turns", "list_written",
     "captured", "subject", "status", "superseded_by",
 )
 
@@ -350,8 +350,8 @@ def write_record(records_dir, *, provider: str, provider_tag: str, session_ref: 
     fields = {
         "title": title, "source": f"{provider}:{session_ref}", "model": model,
         "session_started": session_started, "last_active": last_active or session_started,
-        "turns": turns, "captured": captured or now_iso(), "subject": slug(subject),
-        "status": "open",
+        "turns": turns, "list_written": captured or now_iso(),
+        "captured": captured or now_iso(), "subject": slug(subject), "status": "open",
     }
     block = update_block(session_started if not last_active else last_active, 1, turns,
                          done=done, summary=summary, bugs=bugs, learnings=learnings,
@@ -388,6 +388,7 @@ def append_update(path, *, turns_from: int, turns_to: int, title: str,
                              bugs=bugs, learnings=learnings, outstanding=outstanding)
         # Freshest first: a new update goes straight under the frontmatter.
         body = "\n" + block + "\n\n" + body.lstrip("\n")
+        fm["list_written"] = captured or now_iso()  # this update now holds the project's list
 
     changes = []
     if title and title != fm.get("title"):
@@ -595,6 +596,137 @@ def reorder_updates(path, date: str = "") -> bool:
     return True
 
 
+# --- the project's open list (one list, across sessions and providers) ---------
+# Owner's design, 2026-11-04: one open list for the whole project. Every scribe is
+# handed the project's current list; its update closes what that stretch finished,
+# carries the rest, adds what's new. The newest list written anywhere IS the project's
+# current list. Items carry engine-assigned ids (`[o12]`) so an item opened in one
+# session and closed in another — even by another tool — stays traceable, and a
+# dropped item is detected exactly rather than by matching reworded text.
+
+ITEM_ID = re.compile(r"\[o(\d+)\]")
+STATUS_NAME = "STATUS.md"
+
+
+def _records(records_dir):
+    for p in Path(records_dir).glob("*.md"):
+        if p.name in (INDEX_NAME, STATUS_NAME):
+            continue
+        fm, body = _split(p.read_text(encoding="utf-8"))
+        if is_record(fm):
+            yield p, fm, body
+
+
+def max_item_id(records_dir) -> int:
+    """Highest item id used anywhere in the project's records (0 if none)."""
+    top = 0
+    for _, _, body in _records(records_dir):
+        for m in ITEM_ID.finditer(body):
+            top = max(top, int(m.group(1)))
+    return top
+
+
+def _top_update_date(body: str) -> str:
+    m = re.search(r"(?m)^## Update — (\d{4}-\d{2}-\d{2})", body)
+    return m.group(1) if m else ""
+
+
+def project_open_list(records_dir):
+    """(items, record filename, date) — the newest open list written anywhere in the
+    project. Newest = the record whose list was written last (`list_written`, else
+    `captured` for records from before this existed)."""
+    best = None
+    for p, fm, body in _records(records_dir):
+        key = fm.get("list_written") or fm.get("captured") or ""
+        if best is None or key > best[0]:
+            best = (key, p.name, body)
+    if best is None:
+        return [], "", ""
+    return latest_outstanding(best[2]), best[1], _top_update_date(best[2])
+
+
+def with_ids(items: list, next_id: int):
+    """Give each open item without an id the next one. Returns (items, next_id)."""
+    out = []
+    for it in items:
+        if not ITEM_ID.search(it):
+            it = re.sub(r"^(\s*[-*]\s*)", lambda m: f"{m.group(1)}[o{next_id}] ", it, count=1)
+            next_id += 1
+        out.append(it)
+    return out, next_id
+
+
+def _item_text(line: str) -> str:
+    """An item's wording, comparable: no bullet, id, markup, engine note or case."""
+    t = ITEM_ID.sub("", line).strip().lstrip("-* ")
+    t = t.split(" _(carried by the engine", 1)[0]
+    t = re.sub(r"[*`_]", "", t).lower()
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def settle_outstanding(given: list, returned: str, next_id: int):
+    """Apply the engine's rules to the scribe's Outstanding:
+    - new open items get ids;
+    - every GIVEN item must come back either open or `✓ closed:` (by id); any that
+      doesn't is carried forward by the engine, marked, so nothing disappears silently.
+    Returns (outstanding text, dropped items, next_id)."""
+    lines = [l.rstrip() for l in (returned or "").splitlines() if l.strip()]
+    bullets = [l for l in lines if l.strip().startswith(("-", "*"))]
+    closed = [l for l in bullets if l.strip().lstrip("-* ").startswith("✓ closed")]
+    opened = [l for l in bullets if l not in closed]
+    # A scribe that carries or closes an item but forgets its id would otherwise make
+    # a duplicate (and a false "carried by the engine"). Match by wording, reuse the id.
+    by_text = {_item_text(g): ITEM_ID.search(g).group(0) for g in given if ITEM_ID.search(g)}
+    def _adopt(l, closing):
+        if ITEM_ID.search(l):
+            return l
+        body = l.strip().lstrip("-* ")
+        core = body.split("closed:", 1)[1].split(" — ", 1)[0] if closing and "closed:" in body else body
+        tag = by_text.get(_item_text(core))
+        if not tag:
+            return l
+        if closing:
+            return l.replace("closed:", f"closed: {tag}", 1)
+        return re.sub(r"^(\s*[-*]\s*)", lambda m: f"{m.group(1)}{tag} ", l, count=1)
+    opened = [_adopt(l, False) for l in opened]
+    closed = [_adopt(l, True) for l in closed]
+    opened, next_id = with_ids(opened, next_id)
+    seen = {m.group(1) for l in opened + closed for m in ITEM_ID.finditer(l)}
+    dropped = [g for g in given
+               if (m := ITEM_ID.search(g)) and m.group(1) not in seen]
+    carried = [g.rstrip() + " _(carried by the engine: this stretch didn't mention it)_"
+               for g in dropped]
+    return "\n".join(opened + carried + closed), dropped, next_id
+
+
+def rebuild_status(records_dir, recent: int = 15) -> Path:
+    """STATUS.md — generated, never hand-edited: the project's open list and the most
+    recently closed items, each closure linked to the record that closed it."""
+    records_dir = Path(records_dir)
+    items, src, date = project_open_list(records_dir)
+    closures = []
+    for p, fm, body in _records(records_dir):
+        for sec in _top_sections(body):
+            m = re.match(r"^## Update — (\d{4}-\d{2}-\d{2})", sec)
+            if not m:
+                continue
+            for l in sec.splitlines():
+                if l.strip().lstrip("-* ").startswith("✓ closed"):
+                    closures.append((m.group(1), fm.get("source", "").split(":", 1)[0],
+                                     p.name, l.strip().lstrip("-* ")))
+    closures.sort(key=lambda c: c[0], reverse=True)
+    out = ["# automemory — status", "",
+           "Generated from the records — do not hand-edit.", "",
+           f"## Open ({len(items)})" + (f" — as of {date}, from [{src}]({src})" if src else ""), ""]
+    out += items or ["_(nothing open)_"]
+    out += ["", f"## Recently closed", ""]
+    out += [f"- {d} · {prov} · [{name}]({name}) — {txt}" for d, prov, name, txt in closures[:recent]] \
+        or ["_(nothing closed yet)_"]
+    path = records_dir / STATUS_NAME
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
+    return path
+
+
 # --- INDEX (derived view — rebuilt from frontmatter, never hand-edited) -------
 
 
@@ -609,7 +741,7 @@ def rebuild_index(records_dir, index_path=None, records_link_prefix: str = "") -
     rows = []
     if records_dir.is_dir():
         for p in records_dir.glob("*.md"):
-            if p.name == index_path.name:
+            if p.name in (index_path.name, STATUS_NAME):
                 continue
             fm = _fm_parse(p.read_text(encoding="utf-8"))
             if is_record(fm):

@@ -122,7 +122,8 @@ def _transcript_meta(path: Path) -> dict:
     if not title:
         title = " ".join(first_prompt.split()[:8]) or f"session {path.stem[:8]}"
     return {"occurred": occurred, "last_active": last_active, "title": title[:120],
-            "custom_title": custom[:120], "model": model}
+            "custom_title": custom[:120], "model": model,
+            "started_ts": min(tss) if tss else ""}
 
 
 # --- provider adapters ---------------------------------------------------------
@@ -367,15 +368,6 @@ def _display_name(src, ref: str, cwd: str) -> str:
     return (t[:48] + "…") if len(t) > 49 else (t or record.short(ref))
 
 
-def _interleave(lists: list) -> list:
-    """Round-robin merge, so a shared cap can't be spent entirely on one provider."""
-    out, i = [], 0
-    while any(i < len(l) for l in lists):
-        out.extend(l[i] for l in lists if i < len(l))
-        i += 1
-    return out
-
-
 # --- core (testable) ----------------------------------------------------------
 
 
@@ -391,28 +383,19 @@ def split_turns(text: str) -> list:
     return chunks
 
 
-def _norm_item(line: str) -> str:
-    """Comparable form of an Outstanding bullet: no bullet, markup or case."""
-    t = re.sub(r"[*`_]", "", line.strip().lstrip("-* ")).lower()
-    return re.sub(r"\s+", " ", t).strip()
-
-
-def _words(line: str) -> set:
-    return {w for w in re.findall(r"[a-z0-9]+", _norm_item(line)) if len(w) > 2}
-
-
-def dropped_items(given: list, returned: str) -> list:
-    """Open items handed to the scribe that came back neither carried forward nor
-    closed. Match = at least half of the given item's words appear in one returned bullet (carried
-    or `✓ closed:`), which tolerates rewording; an unmatched item counts as
-    dropped — so the measure can over-count, never silently under-count."""
-    back = [_words(l) for l in (returned or "").splitlines() if l.strip().startswith(("-", "*"))]
-    out = []
-    for g in given:
-        gw = _words(g)
-        if gw and not any(len(gw & b) / len(gw) >= 0.5 for b in back if b):
-            out.append(g)
-    return out
+def _pending_order_key(src, ref: str, cov, records_dir, cwd) -> str:
+    """When the uncovered work began, as a sortable string: a continued session's new
+    stretch began after its record was last captured; a new session at its start.
+    Processing in this order lets ONE open list move forward the way the work did."""
+    if cov is not None:
+        p = record.find_record(records_dir, ref)
+        if p is not None:
+            return record._fm_parse(p.read_text(encoding="utf-8")).get("captured", "")
+    try:
+        m = src.meta(ref, cwd)
+        return m.get("started_ts") or m.get("occurred", "")
+    except Exception:
+        return ""
 
 
 def find_pending(source: _Source, records_dir: Path, cwd: str, current_session: str):
@@ -443,6 +426,14 @@ def find_missing(source: _Source, records_dir: Path, cwd: str, current_session: 
     """Back-compat: refs only."""
     return [ref for ref, _ in find_pending(source, records_dir, cwd, current_session)]
 
+
+_PROJECT_LIST = (
+    "\n\nThis project already has open items from earlier sessions (possibly in other "
+    "tools), listed between BEGIN/END OPEN ITEMS with their ids. In `## Outstanding`, "
+    "close each one this session resolved (`✓ closed: [oN] <exact wording> — <how>`), "
+    "carry forward each one it doesn't mention exactly as given (id included), and add "
+    "this session's new items without an id."
+)
 
 _CONTINUE = (
     "\n\nThis session ALREADY HAS a record. The transcript you are given is ONLY the "
@@ -491,18 +482,19 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
         return {"uuid": ref, "status": "empty", "cost": 0.0}
     existing = record.find_record(records_dir, ref) if covered is not None else None
 
+    # The PROJECT's open list (one list across sessions and tools), with ids — never
+    # the whole old record: stale text handed to the scribe spreads (measured
+    # 2026-11-03 — a never-closed "not built" item merged with new turns into a false
+    # claim). Items without an id yet get one now, so the scribe sees and keeps them.
+    listed, _, _ = record.project_open_list(records_dir)
+    given_items, next_id = record.with_ids(listed, record.max_item_id(records_dir) + 1)
+    open_block = ("\n\n--- BEGIN OPEN ITEMS ---\n" + ("\n".join(given_items) or "(none)")
+                  + "\n--- END OPEN ITEMS ---")
     if existing is not None:
-        # Only the CURRENT open list, not the whole old record: stale text handed
-        # to the scribe spreads (measured 2026-11-03 — a never-closed "not built"
-        # item was merged with new turns into a false claim).
-        _, prior = record._split(existing.read_text(encoding="utf-8"))
-        given_items = record.latest_outstanding(prior)
-        open_items = "\n".join(given_items) or "(none)"
         text = "".join(turns[covered:])
-        instruction = (prompt + _CONTINUE
-                       + f"\n\n--- BEGIN OPEN ITEMS ---\n{open_items}\n--- END OPEN ITEMS ---")
+        instruction = prompt + _CONTINUE + open_block
     else:
-        text, instruction = full, prompt
+        text, instruction = full, prompt + (_PROJECT_LIST + open_block if given_items else "")
     scrubbed, _ = redact.redact(text)
 
     result = None
@@ -539,6 +531,12 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
     # secret that slipped past the first pass still never lands in a file.
     secs = ({k: redact.redact(v)[0] for k, v in _split_sections(result.text).items()}
             if verdict == "ok" else {})
+    dropped = []
+    if verdict == "ok":
+        # The engine's rules on the list: new items get ids; every given item comes
+        # back open or closed — any the scribe left out is carried forward, marked.
+        secs["Outstanding"], dropped, _ = record.settle_outstanding(
+            given_items, secs.get("Outstanding", ""), next_id)
     meta = dict(meta, title=redact.redact(meta.get("title", ""))[0],
                 custom_title=redact.redact(meta.get("custom_title", ""))[0])
 
@@ -554,7 +552,6 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
             outstanding=secs.get("Outstanding", ""), summary=secs.get("Summary", ""),
             bugs=secs.get("Bugs & Fixes", ""))
         status = "updated" if verdict == "ok" else "no-record"
-        dropped = dropped_items(given_items, secs.get("Outstanding", "")) if verdict == "ok" else []
         return {"uuid": ref, "status": status, "cost": result.cost_usd, "path": str(path),
                 "given": len(given_items), "dropped": dropped}
 
@@ -570,7 +567,8 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
         done=secs.get("Done", ""), learnings=secs.get("Learnings & Gotchas", ""),
         outstanding=secs.get("Outstanding", ""), summary=secs.get("Summary", ""),
         bugs=secs.get("Bugs & Fixes", ""))
-    return {"uuid": ref, "status": "ok", "cost": result.cost_usd, "path": str(path)}
+    return {"uuid": ref, "status": "ok", "cost": result.cost_usd, "path": str(path),
+            "given": len(given_items), "dropped": dropped}
 
 
 def _summary_line(outcomes: list, cost: float) -> str:
@@ -630,58 +628,20 @@ def handover_text(records_dir: Path) -> str:
             + open_items_text(records_dir))
 
 
-OPEN_RECORDS, OPEN_LINES = 3, 12  # keep the start-of-session context small
-# Only records active this recently. Older open lists are usually stale (measured
-# 2026-11-03: October records still listed "the trigger does not exist", fixed
-# weeks before in a prose note) — pushing them into every new session would feed
-# the live agent the same stale claims that once misled the scribe.
-OPEN_DAYS = 14  # default; the user's global config `open_items_days` overrides it
-
-
-def _open_days() -> int:
-    try:
-        cfg = Path(os.environ.get("AUTOMEMORY_CONFIG")
-                   or (Path.home() / ".config" / "opencode" / "automemory.json"))
-        return int(json.loads(cfg.read_text(encoding="utf-8")).get("open_items_days", OPEN_DAYS))
-    except (OSError, ValueError, TypeError):
-        return OPEN_DAYS
-
-
+OPEN_LINES = 15  # keep the start-of-session context small
 def open_items_text(records_dir: Path) -> str:
-    """The current open list (newest update's Outstanding, minus closed items) of
-    the most recently active records — so the live agent can act on them, and the
-    next update can close them. Without this, nothing put open items in front of
-    anyone who could act (diagnosed 2026-10-30)."""
-    rows, window = [], _open_days()
-    for p in Path(records_dir).glob("*.md"):
-        if p.name == record.INDEX_NAME:
-            continue
-        fm, body = record._split(p.read_text(encoding="utf-8"))
-        if not record.is_record(fm):
-            continue
-        items = record.latest_outstanding(body)
-        try:
-            from datetime import date as _d
-            age = (_d.today() - _d.fromisoformat(fm.get("last_active", ""))).days
-        except ValueError:
-            age = window + 1
-        if items and age <= window:
-            rows.append((fm.get("last_active", ""), fm, p.name, items))
-    if not rows:
+    """The project's open list — the newest one written anywhere, across sessions and
+    tools — so the live agent can act on it and the next update can close items.
+    Items for the person first. Full list and recent closures: STATUS.md."""
+    items, src, date = record.project_open_list(records_dir)
+    if not items:
         return ""
-    rows.sort(key=lambda r: r[0], reverse=True)
-    out = ["=== automemory: open items (newest update of each record) ==="]
-    for last, fm, name, items in rows[:OPEN_RECORDS]:
-        out.append(f"{fm.get('title', name)} · last active {last} · {name}")
-        # Items for the person first, so a verification they asked to be reminded
-        # of isn't buried under the agent's to-do list.
-        items = ([i for i in items if "**You:**" in i]
-                 + [i for i in items if "**You:**" not in i])
-        out += items[:OPEN_LINES]
-        if len(items) > OPEN_LINES:
-            out.append(f"  … {len(items) - OPEN_LINES} more in the record")
-        out.append("")
-    return "\n".join(out) + "\n"
+    items = ([i for i in items if "**You:**" in i] + [i for i in items if "**You:**" not in i])
+    out = [f"=== automemory: open items (project · as of {date} · {src}) ==="]
+    out += items[:OPEN_LINES]
+    if len(items) > OPEN_LINES:
+        out.append(f"  … {len(items) - OPEN_LINES} more — agent-records/STATUS.md")
+    return "\n".join(out) + "\n\n"
 
 
 class _ProjectLock:
@@ -723,7 +683,7 @@ class _ProjectLock:
 
 def run(payload: dict, *, provider: str = None, claude_projects_root=None,
         opencode_db=None, dispatch_fn=None, cap: int = DEFAULT_CAP, out=None,
-        handover: bool = True) -> dict:
+        handover: bool = True, all_pending: bool = False) -> dict:
     """Orchestrate handover-in + bounded backfill across EVERY provider with
     sessions in this project. Returns a summary dict."""
     out = out or sys.stdout
@@ -757,7 +717,26 @@ def run(payload: dict, *, provider: str = None, claude_projects_root=None,
         with progress.Spinner("checking sessions"):
             per_source = [[(src, ref, cov) for ref, cov in find_pending(src, records_dir, cwd, current)]
                           for src in sources]
-        missing = _interleave(per_source)
+        # Oldest first, across every provider: one open list moves forward in the
+        # order the work happened (a Claude session Monday, a Codex one Tuesday).
+        missing = sorted((x for xs in per_source for x in xs),
+                         key=lambda t: _pending_order_key(t[0], t[1], t[2], records_dir, cwd))
+        if len(missing) > cap and (all_pending or (handover and progress.interactive()
+                                                   and sys.stdin is not None and sys.stdin.isatty())):
+            # A backlog, run by a person: say what it will take and let them choose.
+            if all_pending:
+                cap = len(missing)
+            else:
+                sys.stderr.write(
+                    f"\nautomemory: {len(missing)} sessions are waiting to be recorded "
+                    f"(oldest first). Each is one small model call — roughly a minute and a "
+                    f"few cents each.\n")
+                try:
+                    ans = input(f"Record all {len(missing)} now? [y/N] (N records the oldest {cap}) ")
+                except EOFError:
+                    ans = ""
+                if ans.strip().lower() in ("y", "yes"):
+                    cap = len(missing)
         todo, deferred = missing[:cap], missing[cap:]
 
         # 3. backfill — each session is authored by its own provider's dispatcher
@@ -780,15 +759,16 @@ def run(payload: dict, *, provider: str = None, claude_projects_root=None,
                 wrote += 1
         if any(o["status"] in ("ok", "updated", "no-record") for o in outcomes):
             record.rebuild_index(records_dir)
+            record.rebuild_status(records_dir)
         # ALWAYS report, even when nothing was written: a run that checked sessions and
         # declined them all must not look the same as a run that never happened (#5).
         out.write(_summary_line(outcomes, total_cost) + "\n")
         for o in outcomes:
             if o.get("dropped"):
-                # Measured, not fixed (grader 2026-11-03): how often does the scribe
-                # lose an open item it was given? Decide on a fix once there's a rate.
-                out.write(f"automemory:   {len(o['dropped'])} of {o['given']} open items "
-                          f"neither carried forward nor closed: "
+                # Exact, by id: the scribe left these out; the engine carried them
+                # forward (marked) so nothing vanished. Still worth knowing how often.
+                out.write(f"automemory:   {len(o['dropped'])} of {o['given']} open items not "
+                          f"mentioned by the scribe — carried forward by the engine: "
                           + " | ".join(d.strip()[:80] for d in o["dropped"]) + "\n")
         for o in outcomes:
             if o["status"] in ("dispatch-error", "malformed"):
@@ -804,8 +784,8 @@ def run(payload: dict, *, provider: str = None, claude_projects_root=None,
             out.write(f"automemory: {len(stale)} record(s) in an older format — "
                       f"run `automemory migrate` to update them (snapshot first).\n")
         if deferred:
-            out.write(f"automemory: {len(deferred)} older session(s) pending — "
-                      f"run `automemory process` to catch up.\n")
+            out.write(f"automemory: {len(deferred)} more session(s) waiting — "
+                      f"run `automemory reconcile --all` to record them all now.\n")
 
         # 4. mirror the agent's own memory. Claude Code only (opencode has no such dir),
         # but keyed on the STORE, not on which provider won detection — a project that
@@ -858,7 +838,7 @@ def read_payload() -> dict:
 
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    run(read_payload(), handover="--background" not in argv)
+    run(read_payload(), handover="--background" not in argv, all_pending="--all" in argv)
     return 0
 
 
