@@ -204,7 +204,7 @@ subject: your-project
 status: open
 ---
 
-## Update — 2026-10-30 · turns 12–18
+## Update — 2026-10-30 · turns 12–18 · scribe claude-haiku-5-5
 
 **Summary:** Added the regression test; the redirect bug is closed.
 
@@ -218,7 +218,7 @@ status: open
 - [o2] Document the proxy quirk in the README.
 - ✓ closed: [o1] Add a regression test. — done, runs in CI
 
-## Update — 2026-10-29 · turns 1–11
+## Update — 2026-10-29 · turns 1–11 · scribe claude-haiku-5-5
 
 **Summary:** Found and fixed the login redirect loop; a test is still to do.
 
@@ -265,8 +265,9 @@ The top block always shows the session's **current** state. How it got there is 
 
 ### The sections
 
-Each `## Update — <date> · turns A–B` covers only the turns that were new when it was
-written (usually: since you last exited). Inside it:
+Each `## Update — <date> · turns A–B · scribe <model>` covers only the turns that were new
+when it was written (usually: since you last exited), and names the model that wrote it.
+Inside it:
 
 - **Summary** — one or two sentences: what this stretch was, and how it ended.
 - **`### Done`** — what actually changed: code shipped, a decision made, a problem
@@ -315,12 +316,21 @@ the agent is mid-task is the most common reason for a decline.
 ## Things worth knowing
 
 - **It costs a little.** Each record is one model call on your own account.
-- **Which model writes the records.** automemory never hard-codes one. Claude Code uses
-  the `haiku` alias (always the current Haiku). Codex and opencode use the model the
-  session ran on, falling back to the one you're using now. (Codex reports tokens but not
-  dollars, so its cost shows as unknown.) To choose your own, set `scribe_model`
-  in the config, e.g. `{"scribe_model": {"opencode": "openai/gpt-6-luna"}}`.
-  **⚠ not yet —** opencode's scribe call is failing on working models; under investigation.
+- **Which model writes the records.** The cheapest one each tool offers, without
+  automemory ever naming a model in its code, so a model being retired can't break it:
+  - **Claude Code:** the `haiku` alias (Anthropic's small tier, always the current Haiku).
+  - **Codex:** the model Codex's own list describes as affordable or efficient, best-ranked
+    first. There's no price to read, so this is a judgement from Codex's own words.
+  - **opencode:** opencode's own `small_model`, if you've set one.
+
+  If that isn't available, it falls back to the model your session ran on, then the
+  tool's default, so recording never stops because a model went away. Each update says
+  which model wrote it (`## Update — … · scribe claude-haiku-5-5`). To choose your own,
+  set `scribe_model` in `~/.config/opencode/automemory.json`, e.g.
+  `{"scribe_model": {"codex": "gpt-6-luna"}}`. Cheaper scribes are a little less careful;
+  if records slip, choose a better one. (Codex reports tokens but not dollars, so its cost
+  shows as unknown.) **⚠ not yet —** opencode's scribe call is failing on working models;
+  under investigation.
 - **Automatic runs do up to 5 sessions at a time,** in the background, so a big backlog
   never stalls you; a manual run offers to do them all (see *Starting on a project…*).
 - **opencode's last session waits for the next one.** opencode has no end-of-session hook,

@@ -214,11 +214,13 @@ def author(
             model=model,
         )
 
+    # The model that ACTUALLY answered (an alias like "haiku" resolves to a version).
+    used = next(iter(d.get("modelUsage") or {}), "") or model
     return DispatchResult(
         text=(d.get("result") or "").strip(),
         cost_usd=float(d.get("total_cost_usd") or 0.0),
         usage=d.get("usage") or {},
-        model=model,
+        model=used,
     )
 
 

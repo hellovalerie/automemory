@@ -165,6 +165,52 @@ class _Source:
         return [dispatch.default_model(self.name)]
 
 
+# --- cheapest scribe, without naming a model in code -------------------------------
+# Owner, 2026-11-05: use each tool's cheapest model for scribing, but never by naming a
+# model (names get retired; a hardcoded one already killed opencode once). Only a tool
+# that EXPOSES a cheap tier can be asked for it; every chain then ends in models that
+# can't be dead — the session's own model, then the tool's default.
+_CHEAP_WORDS = ("affordable", "efficient", "cheap", "mini", "lite", "small")
+
+
+def codex_cheapest(home=None):
+    """The model Codex itself DESCRIBES as affordable/efficient, newest-ranked first (its
+    `priority`), from ~/.codex/models_cache.json. A heuristic over Codex's own words —
+    there is no price field — so it re-derives itself as Codex's list changes. None if
+    nothing qualifies."""
+    try:
+        root = Path(home or os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+        models = json.loads((root / "models_cache.json").read_text(encoding="utf-8"))["models"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    cands = [m for m in models if m.get("visibility") == "list" and m.get("supported_in_api")
+             and any(w in (m.get("description") or "").lower() for w in _CHEAP_WORDS)]
+    cands.sort(key=lambda m: m.get("priority", 999))
+    return cands[0]["slug"] if cands else None
+
+
+def opencode_small_model():
+    """opencode's own `small_model` setting, if the user set one (its cheap tier)."""
+    for name in ("opencode.json", "opencode.jsonc"):
+        p = Path.home() / ".config" / "opencode" / name
+        try:
+            text = re.sub(r"(?m)^\s*//.*$", "", p.read_text(encoding="utf-8"))
+            v = json.loads(text).get("small_model")
+            if v:
+                return v
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def _chain(*models) -> list:
+    out = []
+    for m in models:
+        if m not in out:
+            out.append(m)
+    return [m for m in out if m] + [None]   # None = the tool's own default, always last
+
+
 class _ClaudeCodeSource(_Source):
     """Claude Code: one JSONL file per session under ~/.claude/projects/<slug>/.
 
@@ -215,6 +261,13 @@ class _ClaudeCodeSource(_Source):
         except OSError:
             return False
 
+    def scribe_models(self, ref: str, cwd: str = None) -> list:
+        """Configured → Claude's small-tier alias (`haiku`, kept current by Anthropic) →
+        the session's own model → Claude's default. The fallbacks mean a retired alias
+        degrades the cost, never the recording."""
+        return _chain(dispatch.default_model(self.name), providers.scribe_model(self.name),
+                      self.meta(ref, cwd).get("model"))
+
 
 class _OpencodeSource(_Source):
     """opencode: one SQLite store at ~/.local/share/opencode/opencode.db, rows
@@ -260,18 +313,15 @@ class _OpencodeSource(_Source):
         return m
 
     def scribe_models(self, ref: str, cwd: str = None) -> list:
-        """User's configured model, then the model the session itself ran on,
-        then the model the user is on NOW (latest session anywhere) — so an old
-        session whose model has since been retired still gets a scribe. NOT
-        "omit --model": opencode then picks the head of its recently-used
-        list, which can be a retired model (measured 2026-10-29 — it was), and
-        with the scribe agent that hangs instead of erroring."""
-        out = []
-        for m in (dispatch.default_model(self.name),
-                  transcript.opencode_session_model_ref(ref, db=self.db),
-                  transcript.opencode_latest_model_ref(db=self.db)):
-            if m and m not in out:
-                out.append(m)
+        """Configured → opencode's own `small_model` (its cheap tier, if the user set
+        one) → the model the session ran on → the model the user is on now. Candidates
+        opencode no longer lists are dropped first: a retired model can HANG for the
+        full timeout instead of erroring (measured 2026-10-29). Not "omit --model":
+        opencode then picks the head of its recently-used list, which can be a retired
+        model — and with the scribe agent that hangs."""
+        out = [m for m in _chain(dispatch.default_model(self.name), opencode_small_model(),
+                                 transcript.opencode_session_model_ref(ref, db=self.db),
+                                 transcript.opencode_latest_model_ref(db=self.db)) if m]
         avail = self._available_models()
         live = [m for m in out if avail is None or m in avail]
         return live or out  # can't verify any? try them anyway, errors are logged
@@ -360,12 +410,11 @@ class _CodexSource(_Source):
                    transcript._codex_items(self._path(ref, cwd) or Path("/nonexistent")))
 
     def scribe_models(self, ref: str, cwd: str = None) -> list:
-        """Configured model, then the session's own last model, then Codex's default."""
-        out = []
-        for m in (dispatch.default_model(self.name), self.meta(ref, cwd).get("model")):
-            if m and m not in out:
-                out.append(m)
-        return out + [None]
+        """Configured → the model Codex itself describes as affordable (heuristic over its
+        own model list; no price exists to read) → the session's own model → Codex's
+        default."""
+        return _chain(dispatch.default_model(self.name), codex_cheapest(self.home),
+                      self.meta(ref, cwd).get("model"))
 
 
 def resolve_source(cwd: str, provider: str = None, **kw) -> _Source:
@@ -585,6 +634,10 @@ def _dispatch_first_working(dispatch_fn, text: str, prompt: str, models: list):
     result = None
     for m in models or [None]:
         result = dispatch_fn(text, prompt, model=m)
+        try:  # name the model that answered; None = the tool's own default
+            result.model = getattr(result, "model", "") or m or "default"
+        except AttributeError:
+            pass
         if not (result.is_error and any(g in (result.error or "").lower()
                                         for g in _MODEL_GONE)):
             return result
@@ -662,6 +715,7 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
     # secret that slipped past the first pass still never lands in a file.
     secs = ({k: redact.redact(v)[0] for k, v in _split_sections(result.text).items()}
             if verdict == "ok" else {})
+    scribe = getattr(result, "model", "") or ""
     dropped = []
     if verdict == "ok":
         # The engine's rules on the list: new items get ids; every given item comes
@@ -684,16 +738,16 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
             provider_tag=tag, session_ref=ref, date=meta.get("last_active", ""),
             done=secs.get("Done", ""), learnings=secs.get("Learnings & Gotchas", ""),
             outstanding=secs.get("Outstanding", ""), summary=secs.get("Summary", ""),
-            bugs=secs.get("Bugs & Fixes", ""))
+            bugs=secs.get("Bugs & Fixes", ""), scribe=scribe)
         status = "updated" if verdict == "ok" else "no-record"
         return {"uuid": ref, "status": status, "cost": result.cost_usd, "path": str(path),
-                "given": len(given_items), "dropped": dropped}
+                "given": len(given_items), "dropped": dropped, "scribe": scribe}
 
     if verdict == "norecord":
         reason = result.text.strip()[len("NO-RECORD"):].lstrip(" :—-").strip()
         record.mark_declined(records_dir, ref, total, chars=len(full),
                              reason=redact.redact(reason.splitlines()[0] if reason else "")[0])
-        return {"uuid": ref, "status": "no-record", "cost": result.cost_usd,
+        return {"uuid": ref, "status": "no-record", "cost": result.cost_usd, "scribe": scribe,
                 "reason": record._declined_load(records_dir).get(ref, {}).get("reason", "")}
 
     path = record.write_record(
@@ -703,9 +757,9 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
         last_active=meta.get("last_active", ""), turns=total, seen_chars=len(full),
         done=secs.get("Done", ""), learnings=secs.get("Learnings & Gotchas", ""),
         outstanding=secs.get("Outstanding", ""), summary=secs.get("Summary", ""),
-        bugs=secs.get("Bugs & Fixes", ""))
+        bugs=secs.get("Bugs & Fixes", ""), scribe=scribe)
     return {"uuid": ref, "status": "ok", "cost": result.cost_usd, "path": str(path),
-            "given": len(given_items), "dropped": dropped}
+            "given": len(given_items), "dropped": dropped, "scribe": scribe}
 
 
 def _summary_line(outcomes: list, cost: float) -> str:
@@ -890,6 +944,7 @@ def run(payload: dict, *, provider: str = None, claude_projects_root=None,
                 r = backfill_one(src, ref, records_dir, project, prompt,
                                  src.scribe_models(ref, cwd), fn, cwd, covered=cov)
             why = f" — {r['reason']}" if r.get("reason") else ""
+            why += f" · scribe {r['scribe']}" if r.get("scribe") else ""
             progress.note(f"  {_VERB.get(r['status'], r['status'])} {name}{why}")
             r["provider"] = src.name
             outcomes.append(r)

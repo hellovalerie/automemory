@@ -293,9 +293,11 @@ def _sections(done: str, learnings: str, outstanding: str, level: str = "##",
 
 def update_block(date: str, turns_from: int, turns_to: int, *, done: str,
                  summary: str = "", bugs: str = "", learnings: str = "",
-                 outstanding: str = "") -> str:
-    """Every batch of a session — the first one too — has this one shape."""
-    header = f"## Update — {date} · turns {turns_from}–{turns_to}"
+                 outstanding: str = "", scribe: str = "") -> str:
+    """Every batch of a session — the first one too — has this one shape. The header
+    names the model that WROTE it (`· scribe …`): the session's model is in the
+    frontmatter, but the author of each update can differ, and provenance needs both."""
+    header = f"## Update — {date} · turns {turns_from}–{turns_to}" + (f" · scribe {scribe}" if scribe else "")
     return "\n".join([header, "", *_sections(done, learnings, outstanding, "###",
                                               summary=summary, bugs=bugs)]).rstrip("\n")
 
@@ -366,7 +368,7 @@ def write_record(records_dir, *, provider: str, provider_tag: str, session_ref: 
                  model: str, subject: str, title: str, custom_title: str = "",
                  session_started: str, last_active: str = "", turns: int = 0, seen_chars: int = 0,
                  done: str, learnings: str = "", outstanding: str = "",
-                 summary: str = "", bugs: str = "", captured: str = "") -> Path:
+                 summary: str = "", bugs: str = "", captured: str = "", scribe: str = "") -> Path:
     """Create a session's record. `done` is mandatory — it IS the write-gate.
     A session that already has a record must use `append_update` instead."""
     if not (done and done.strip()):
@@ -385,7 +387,7 @@ def write_record(records_dir, *, provider: str, provider_tag: str, session_ref: 
         "turns": turns, "seen_chars": seen_chars or "", "list_written": captured or now_iso(),
         "captured": captured or now_iso(), "subject": slug(subject), "status": "open",
     }
-    block = update_block(session_started if not last_active else last_active, 1, turns,
+    block = update_block(session_started if not last_active else last_active, 1, turns, scribe=scribe,
                          done=done, summary=summary, bugs=bugs, learnings=learnings,
                          outstanding=outstanding)
     body = "\n" + block + "\n\n## Edits\nnone\n"
@@ -400,7 +402,7 @@ def append_update(path, *, turns_from: int, turns_to: int, title: str, seen_char
                   custom_title: str = "", model: str, last_active: str,
                   provider_tag: str, session_ref: str, done: str = "",
                   learnings: str = "", outstanding: str = "", date: str = "",
-                  summary: str = "", bugs: str = "", captured: str = "") -> Path:
+                  summary: str = "", bugs: str = "", captured: str = "", scribe: str = "") -> Path:
     """Continue a record exactly where it left off.
 
     - A dated `## Update — <date> · turns A–B` block, only if the scribe found
@@ -416,7 +418,7 @@ def append_update(path, *, turns_from: int, turns_to: int, title: str, seen_char
     fm, body = _split(path.read_text(encoding="utf-8"))
 
     if done and done.strip():
-        block = update_block(date, turns_from, turns_to, done=done, summary=summary,
+        block = update_block(date, turns_from, turns_to, scribe=scribe, done=done, summary=summary,
                              bugs=bugs, learnings=learnings, outstanding=outstanding)
         # Freshest first: a new update goes straight under the frontmatter.
         body = "\n" + block + "\n\n" + body.lstrip("\n")
