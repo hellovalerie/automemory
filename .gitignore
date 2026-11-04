@@ -18,3 +18,5 @@ dev/transcript-extractor/parsed/
 #
 # To publish a rinsed tree to the public repo, see `rinse` in CLAUDE.md / the
 # project's release notes: clone to a temp dir, filter, force-push.
+# Evaluation kits, prompts and results (owner, 2026-11-05): kept locally, not tracked.
+dev/eval/
