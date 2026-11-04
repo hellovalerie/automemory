@@ -368,4 +368,4 @@ the agent is mid-task is the most common reason for a decline.
 
 ## Licence
 
-**⚠ not yet chosen.**
+[MIT](LICENSE).
