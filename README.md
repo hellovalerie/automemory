@@ -53,9 +53,6 @@ never required.
 
 ## Install
 
-> **⚠ partly —** `uv tool install` verified on macOS (2026-10-29, editable, from a local
-> checkout). Installing from the GitHub URL needs a public release first.
-
 ```bash
 uv tool install git+https://github.com/hellovalerie/automemory    # recommended
 # or: pipx install git+https://github.com/hellovalerie/automemory
