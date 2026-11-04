@@ -74,7 +74,7 @@ def _valid_or_norecord(text: str) -> str:
     """'norecord' (write-gate said no) | 'ok' (has a non-empty Done) | 'bad'."""
     t = (text or "").strip()
     if t.upper().startswith("NO-RECORD"):
-        return "norecord"
+        return "norecord"   # may carry a reason: "NO-RECORD: <why>"
     if "## Done" in t and t.split("## Done", 1)[1].strip():
         return "ok"
     return "bad"
@@ -533,8 +533,20 @@ def find_pending(source: _Source, records_dir: Path, cwd: str, current_session: 
             if source.has_content(ref, cwd):
                 out.append((ref, None))
             continue
-        if len(split_turns(source.render(ref, cwd))) > covered:
+        text = source.render(ref, cwd)
+        turns = len(split_turns(text))
+        seen = record.covered_chars(records_dir, ref)
+        if turns > covered:
             out.append((ref, covered))
+        elif (turns == covered and covered > 0 and not seen
+              and record.find_record(records_dir, ref) is None):
+            # A decline from before declines remembered how much they saw: growth can't
+            # be detected, so look once more (one scribe call per old decline).
+            out.append((ref, covered - 1))
+        elif turns == covered and seen and len(text) > seen and covered > 0:
+            # Same number of turns, but the last one grew after it was checked (work
+            # that finished later — measured 2026-11-04). Re-cover that last turn.
+            out.append((ref, covered - 1))
     return out
 
 
@@ -663,7 +675,7 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
         # Continue in place. A declined stretch adds no block but still advances
         # `turns` and records any title/model/filename change.
         path = record.append_update(
-            existing, turns_from=covered + 1, turns_to=total,
+            existing, turns_from=covered + 1, turns_to=total, seen_chars=len(full),
             title=meta["title"], custom_title=meta.get("custom_title", ""),
             model=meta["model"], last_active=meta.get("last_active", ""),
             provider_tag=tag, session_ref=ref, date=meta.get("last_active", ""),
@@ -675,14 +687,17 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
                 "given": len(given_items), "dropped": dropped}
 
     if verdict == "norecord":
-        record.mark_declined(records_dir, ref, total)
-        return {"uuid": ref, "status": "no-record", "cost": result.cost_usd}
+        reason = result.text.strip()[len("NO-RECORD"):].lstrip(" :—-").strip()
+        record.mark_declined(records_dir, ref, total, chars=len(full),
+                             reason=redact.redact(reason.splitlines()[0] if reason else "")[0])
+        return {"uuid": ref, "status": "no-record", "cost": result.cost_usd,
+                "reason": record._declined_load(records_dir).get(ref, {}).get("reason", "")}
 
     path = record.write_record(
         records_dir, provider=source.name, provider_tag=tag, session_ref=ref,
         model=meta["model"], subject=project, title=meta["title"],
         custom_title=meta.get("custom_title", ""), session_started=meta["occurred"],
-        last_active=meta.get("last_active", ""), turns=total,
+        last_active=meta.get("last_active", ""), turns=total, seen_chars=len(full),
         done=secs.get("Done", ""), learnings=secs.get("Learnings & Gotchas", ""),
         outstanding=secs.get("Outstanding", ""), summary=secs.get("Summary", ""),
         bugs=secs.get("Bugs & Fixes", ""))
@@ -871,7 +886,8 @@ def run(payload: dict, *, provider: str = None, claude_projects_root=None,
             with progress.Spinner(f"{what} {i}/{len(todo)} · {src.name} · {name}"):
                 r = backfill_one(src, ref, records_dir, project, prompt,
                                  src.scribe_models(ref, cwd), fn, cwd, covered=cov)
-            progress.note(f"  {_VERB.get(r['status'], r['status'])} {name}")
+            why = f" — {r['reason']}" if r.get("reason") else ""
+            progress.note(f"  {_VERB.get(r['status'], r['status'])} {name}{why}")
             r["provider"] = src.name
             outcomes.append(r)
             total_cost += r.get("cost", 0.0)
@@ -890,6 +906,10 @@ def run(payload: dict, *, provider: str = None, claude_projects_root=None,
                 out.write(f"automemory:   {len(o['dropped'])} of {o['given']} open items not "
                           f"mentioned by the scribe — carried forward by the engine: "
                           + " | ".join(d.strip()[:80] for d in o["dropped"]) + "\n")
+        for o in outcomes:
+            if o["status"] == "no-record" and o.get("reason"):
+                out.write(f"automemory:   declined {o.get('provider', '')}:{record.short(o['uuid'])}"
+                          f" — {o['reason']}\n")
         for o in outcomes:
             if o["status"] in ("dispatch-error", "malformed"):
                 out.write(f"automemory:   {o['status']} {o.get('provider', '')}:{o['uuid']}"

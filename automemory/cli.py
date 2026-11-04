@@ -419,8 +419,11 @@ def cmd_doctor(_args) -> int:
                  f"{max(files, key=lambda p: p.stat().st_mtime).name if files else '—'}")
         items, src, date = record.project_open_list(recs)
         L.append(f"- open items: {len(items)} (as of {date or '—'}, from {src or '—'})")
-        L.append(f"- ignored sessions: {len(record.ignored_sessions(recs))}; "
-                 f"declined: {len(record._declined_load(recs))}")
+        dec = record._declined_load(recs)
+        L.append(f"- ignored sessions: {len(record.ignored_sessions(recs))}; declined: {len(dec)}")
+        for ref, e in list(dec.items())[-10:]:
+            L.append(f"  - declined `{record.short(ref)}` at {e.get('at', '?')}, {e.get('turns')} turn(s)"
+                     f" — {e.get('reason') or '(no reason saved: declined before reasons existed)'}")
         lock = recs / ".run.lock"
         if lock.exists():
             import time as _t

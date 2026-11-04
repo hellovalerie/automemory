@@ -42,6 +42,11 @@ def short(session_ref: str) -> str:
     Bare UUIDs (Claude Code `9f2c1a44-3b7e-…`) keep their 8-char prefix.
     """
     ref = (session_ref or "").strip()
+    # UUIDv7 (Codex) starts with a timestamp: sessions begun in the same minute share
+    # their first 8 characters (measured 2026-11-04: two `01a1a593…` sessions). Use the
+    # random tail instead. Random UUIDs (Claude Code, v4) keep their historical prefix.
+    if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}", ref, re.I):
+        return ref[-8:]
     runs = re.findall(r"[A-Za-z0-9]+", ref)
     if not runs:
         return "unknown"
@@ -66,7 +71,8 @@ def today() -> str:
 # STATE of the session (latest title, last-used model); history of how it got
 # there lives in the body's `## Changes`.
 _ORDER = (
-    "title", "source", "model", "session_started", "last_active", "turns", "list_written",
+    "title", "source", "model", "session_started", "last_active", "turns", "seen_chars",
+    "list_written",
     "captured", "subject", "status", "superseded_by",
 )
 
@@ -196,7 +202,20 @@ def covered_turns(records_dir, session_ref: str):
             return int(_fm_parse(p.read_text(encoding="utf-8")).get("turns") or 0)
         except ValueError:
             return 0
-    return _declined_load(records_dir).get(session_ref)
+    return declined_turns(records_dir, session_ref)
+
+
+def covered_chars(records_dir, session_ref: str) -> int:
+    """How much rendered transcript was seen when the session was last handled (0 if
+    unknown) — catches a turn that kept growing after it was checked."""
+    p = find_record(records_dir, session_ref)
+    if p is not None:
+        try:
+            return int(_fm_parse(p.read_text(encoding="utf-8")).get("seen_chars") or 0)
+        except ValueError:
+            return 0
+    e = _declined_load(records_dir).get(session_ref)
+    return int(e.get("chars") or 0) if e else 0
 
 
 # --- ignored sessions (never recorded) -------------------------------------------
@@ -229,18 +248,31 @@ def ignore_session(records_dir, session_ref: str, note: str = "") -> bool:
 
 
 def _declined_load(records_dir) -> dict:
+    """{session ref: {"turns", "chars", "reason", "at"}} — older files stored a bare
+    turn count; read both."""
     try:
-        return json.loads((Path(records_dir) / DECLINED_NAME).read_text(encoding="utf-8"))
+        raw = json.loads((Path(records_dir) / DECLINED_NAME).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+    return {k: (v if isinstance(v, dict) else {"turns": int(v)}) for k, v in raw.items()}
 
 
-def mark_declined(records_dir, session_ref: str, turns: int) -> None:
-    """The scribe said NO-RECORD up to `turns`. Re-checked only if it grows."""
+def declined_turns(records_dir, session_ref: str):
+    e = _declined_load(records_dir).get(session_ref)
+    return e.get("turns") if e else None
+
+
+def mark_declined(records_dir, session_ref: str, turns: int, chars: int = 0,
+                  reason: str = "") -> None:
+    """The scribe said NO-RECORD for what it saw (`turns`, `chars`). Re-checked if the
+    session grows — more turns, OR the last turn grew (work that finished after the
+    check: measured 2026-11-04, a session declined mid-task whose task then completed
+    inside the same turn would never have been looked at again)."""
     records_dir = Path(records_dir)
     records_dir.mkdir(parents=True, exist_ok=True)
     data = _declined_load(records_dir)
-    data[session_ref] = int(turns)
+    data[session_ref] = {"turns": int(turns), "chars": int(chars),
+                         "reason": (reason or "").strip()[:200], "at": now_iso()}
     (records_dir / DECLINED_NAME).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n",
                                              encoding="utf-8")
 
@@ -332,7 +364,7 @@ def _add_changes(body: str, entries: list) -> str:
 
 def write_record(records_dir, *, provider: str, provider_tag: str, session_ref: str,
                  model: str, subject: str, title: str, custom_title: str = "",
-                 session_started: str, last_active: str = "", turns: int = 0,
+                 session_started: str, last_active: str = "", turns: int = 0, seen_chars: int = 0,
                  done: str, learnings: str = "", outstanding: str = "",
                  summary: str = "", bugs: str = "", captured: str = "") -> Path:
     """Create a session's record. `done` is mandatory — it IS the write-gate.
@@ -350,7 +382,7 @@ def write_record(records_dir, *, provider: str, provider_tag: str, session_ref: 
     fields = {
         "title": title, "source": f"{provider}:{session_ref}", "model": model,
         "session_started": session_started, "last_active": last_active or session_started,
-        "turns": turns, "list_written": captured or now_iso(),
+        "turns": turns, "seen_chars": seen_chars or "", "list_written": captured or now_iso(),
         "captured": captured or now_iso(), "subject": slug(subject), "status": "open",
     }
     block = update_block(session_started if not last_active else last_active, 1, turns,
@@ -364,7 +396,7 @@ def write_record(records_dir, *, provider: str, provider_tag: str, session_ref: 
 # --- write: continue an existing record ----------------------------------------
 
 
-def append_update(path, *, turns_from: int, turns_to: int, title: str,
+def append_update(path, *, turns_from: int, turns_to: int, title: str, seen_chars: int = 0,
                   custom_title: str = "", model: str, last_active: str,
                   provider_tag: str, session_ref: str, done: str = "",
                   learnings: str = "", outstanding: str = "", date: str = "",
@@ -406,6 +438,8 @@ def append_update(path, *, turns_from: int, turns_to: int, title: str,
 
     body = _add_changes(body, changes)
     fm["turns"] = turns_to
+    if seen_chars:
+        fm["seen_chars"] = seen_chars
     fm["last_active"] = last_active or date
     fm["captured"] = captured or now_iso()
     _guarded_write(path, _fm_dump(fm) + "\n" + body)

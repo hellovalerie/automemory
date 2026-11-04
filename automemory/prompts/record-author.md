@@ -32,7 +32,8 @@ you're given carry ids like `[o12]`:
 
 Rules:
 - **Write-gate:** if the session produced no concrete Done — pure Q&A, reading, or
-  exploration that left no durable result — output exactly `NO-RECORD` and nothing else.
+  exploration that left no durable result, or work still in progress with no outcome yet — output
+  `NO-RECORD: <one short line saying why>` and nothing else.
 - Facts only, drawn strictly from the transcript. Do not invent, infer beyond the text, or
   add praise, preamble, or meta-commentary.
 - Say something is unfinished, unbuilt or still open ONLY if the transcript shows it. An
