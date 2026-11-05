@@ -61,6 +61,26 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def local_stamp(iso: str):
+    """A transcript timestamp (UTC ISO, any precision) → (local date, "HH:MM +08") on
+    this machine. Dates were UTC before 2026-11-05, so work before 08:00 in +08 was
+    dated the day before. ("", "") if unreadable."""
+    import datetime as _dt
+    m = re.match(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?$",
+                 (iso or "").strip())
+    if not m:
+        return "", ""
+    d, hh, mm, ss, tz = m.groups()
+    tz = "+00:00" if tz in (None, "Z") else (tz if ":" in tz else tz[:3] + ":" + tz[3:])
+    try:
+        t = _dt.datetime.fromisoformat(f"{d}T{hh}:{mm}:{ss or '00'}{tz}").astimezone()
+    except ValueError:
+        return "", ""
+    off = t.strftime("%z")
+    off = off[:3] if off.endswith("00") else f"{off[:3]}:{off[3:]}"
+    return t.strftime("%Y-%m-%d"), t.strftime("%H:%M ") + off
+
+
 def today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -293,11 +313,16 @@ def _sections(done: str, learnings: str, outstanding: str, level: str = "##",
 
 def update_block(date: str, turns_from: int, turns_to: int, *, done: str,
                  summary: str = "", bugs: str = "", learnings: str = "",
-                 outstanding: str = "", scribe: str = "") -> str:
+                 outstanding: str = "", scribe: str = "", time: str = "",
+                 stretch: int = 0) -> str:
     """Every batch of a session — the first one too — has this one shape. The header
     names the model that WROTE it (`· scribe …`): the session's model is in the
     frontmatter, but the author of each update can differ, and provenance needs both."""
-    header = f"## Update — {date} · turns {turns_from}–{turns_to}" + (f" · scribe {scribe}" if scribe else "")
+    # Time + the day's stretch number (owner, 2026-11-05): a date alone can't tell apart
+    # several stretches in one day.
+    header = (f"## Update — {date}" + (f" {time}" if time else "")
+              + (f" · Stretch #{stretch}" if stretch else "")
+              + f" · turns {turns_from}–{turns_to}" + (f" · scribe {scribe}" if scribe else ""))
     return "\n".join([header, "", *_sections(done, learnings, outstanding, "###",
                                               summary=summary, bugs=bugs)]).rstrip("\n")
 
@@ -368,7 +393,8 @@ def write_record(records_dir, *, provider: str, provider_tag: str, session_ref: 
                  model: str, subject: str, title: str, custom_title: str = "",
                  session_started: str, last_active: str = "", turns: int = 0, seen_chars: int = 0,
                  done: str, learnings: str = "", outstanding: str = "",
-                 summary: str = "", bugs: str = "", captured: str = "", scribe: str = "") -> Path:
+                 summary: str = "", bugs: str = "", captured: str = "", scribe: str = "",
+                 time: str = "") -> Path:
     """Create a session's record. `done` is mandatory — it IS the write-gate.
     A session that already has a record must use `append_update` instead."""
     if not (done and done.strip()):
@@ -388,6 +414,7 @@ def write_record(records_dir, *, provider: str, provider_tag: str, session_ref: 
         "captured": captured or now_iso(), "subject": slug(subject), "status": "open",
     }
     block = update_block(session_started if not last_active else last_active, 1, turns, scribe=scribe,
+                         time=time, stretch=1 if time else 0,
                          done=done, summary=summary, bugs=bugs, learnings=learnings,
                          outstanding=outstanding)
     body = "\n" + block + "\n\n## Edits\nnone\n"
@@ -403,7 +430,7 @@ def append_update(path, *, turns_from: int, turns_to: int, title: str, seen_char
                   provider_tag: str, session_ref: str, done: str = "",
                   learnings: str = "", outstanding: str = "", date: str = "",
                   summary: str = "", bugs: str = "", captured: str = "", scribe: str = "",
-                  declined: bool = False, declined_reason: str = "") -> Path:
+                  declined: bool = False, declined_reason: str = "", time: str = "") -> Path:
     """Continue a record exactly where it left off.
 
     - A dated `## Update — <date> · turns A–B` block, only if the scribe found
@@ -419,7 +446,9 @@ def append_update(path, *, turns_from: int, turns_to: int, title: str, seen_char
     fm, body = _split(path.read_text(encoding="utf-8"))
 
     if done and done.strip():
+        stretch = len(re.findall(rf"(?m)^## Update — {re.escape(date)}\b", body)) + 1 if time else 0
         block = update_block(date, turns_from, turns_to, scribe=scribe, done=done, summary=summary,
+                             time=time, stretch=stretch,
                              bugs=bugs, learnings=learnings, outstanding=outstanding)
         # Freshest first: a new update goes straight under the frontmatter.
         body = "\n" + block + "\n\n" + body.lstrip("\n")

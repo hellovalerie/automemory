@@ -205,7 +205,7 @@ subject: your-project
 status: open
 ---
 
-## Update — 2026-10-30 · turns 12–18 · scribe claude-haiku-5-5
+## Update — 2026-10-30 16:42 +08 · Stretch #1 · turns 12–18 · scribe claude-haiku-5-5
 
 **Summary:** Added the regression test; the redirect bug is closed.
 
@@ -219,7 +219,7 @@ status: open
 - [o2] Document the proxy quirk in the README.
 - ✓ closed: [o1] Add a regression test. — done, runs in CI
 
-## Update — 2026-10-29 · turns 1–11 · scribe claude-haiku-5-5
+## Update — 2026-10-29 21:05 +08 · Stretch #1 · turns 1–11 · scribe claude-haiku-5-5
 
 **Summary:** Found and fixed the login redirect loop; a test is still to do.
 
@@ -266,8 +266,11 @@ The top block always shows the session's **current** state. How it got there is 
 
 ### The sections
 
-Each `## Update — <date> · turns A–B · scribe <model>` covers only the turns that were new
-when it was written (usually: since you last exited), and names the model that wrote it.
+Each `## Update — <date> <time> · Stretch #N · turns A–B · scribe <model>` covers only the
+turns that were new when it was written (usually: since you last exited), and names the
+model that wrote it. The date and time are your local time at the stretch's last turn;
+`Stretch #N` counts that day's updates in this record, so several stretches in one day stay
+apart. (Updates written before 2026-11-05 show the date only.)
 Inside it:
 
 - **Summary** — one or two sentences: what this stretch was, and how it ended.

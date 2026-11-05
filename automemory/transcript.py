@@ -498,7 +498,7 @@ def opencode_session_meta(session_id, db=None) -> dict:
 
 
 def opencode_session_last_active(session_id: str, db=None) -> str:
-    """YYYY-MM-DD of the session's last update, or ""."""
+    """UTC ISO time of the session's last update, or "" (callers take [:10] for a date)."""
     import datetime as _dt
     try:
         con = _oc_connect(db)
@@ -511,7 +511,7 @@ def opencode_session_last_active(session_id: str, db=None) -> str:
                                   (session_id,)).fetchone()
                 if row and row[0]:
                     return _dt.datetime.fromtimestamp(
-                        row[0] / 1000, _dt.timezone.utc).strftime("%Y-%m-%d")
+                        row[0] / 1000, _dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         return ""
     except sqlite3.Error:
         return ""
@@ -697,7 +697,7 @@ def codex_session_meta(path, home=None) -> dict:
         title = " ".join(first.split()[:8]) or f"session {sid[:8]}"
     started = min(tss) if tss else ""
     return {"occurred": started[:10] or "0000-00-00", "last_active": (max(tss) if tss else "")[:10],
-            "started_ts": started, "title": title[:120],
+            "started_ts": started, "last_active_ts": max(tss) if tss else "", "title": title[:120],
             # Codex's thread_name can't yet be told apart from an auto-title, so files
             # are named by session id (see #10).
             "custom_title": "", "model": model}

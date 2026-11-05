@@ -123,7 +123,7 @@ def _transcript_meta(path: Path) -> dict:
         title = " ".join(first_prompt.split()[:8]) or f"session {path.stem[:8]}"
     return {"occurred": occurred, "last_active": last_active, "title": title[:120],
             "custom_title": custom[:120], "model": model,
-            "started_ts": min(tss) if tss else ""}
+            "started_ts": min(tss) if tss else "", "last_active_ts": max(tss) if tss else ""}
 
 
 # --- provider adapters ---------------------------------------------------------
@@ -305,8 +305,8 @@ class _OpencodeSource(_Source):
         last = transcript.opencode_session_model_ref(ref, db=self.db)
         if last:
             m["model"] = last.split("/", 1)[-1]  # last used, not most frequent
-        m["last_active"] = (transcript.opencode_session_last_active(ref, db=self.db)
-                            or m.get("occurred", ""))
+        m["last_active_ts"] = transcript.opencode_session_last_active(ref, db=self.db)
+        m["last_active"] = m["last_active_ts"][:10] or m.get("occurred", "")
         # opencode's session title can't be told apart from a user rename, so the
         # filename falls back to the session id (custom_title stays empty).
         m.setdefault("custom_title", "")
@@ -712,6 +712,14 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
         return {"uuid": ref, "status": "malformed", "cost": result.cost_usd}
 
     meta = source.meta(ref, cwd)
+    # Dates and the update's time are LOCAL to this machine, taken from the stretch's
+    # last turn (transcripts store UTC).
+    day, clock = record.local_stamp(meta.get("last_active_ts", ""))
+    if day:
+        meta = dict(meta, last_active=day)
+    sday, _ = record.local_stamp(meta.get("started_ts", ""))
+    if sday:
+        meta = dict(meta, occurred=sday)
     tag = providers.resolve(source.name).file_tag or source.name
     # Second net: scrub what the scribe WROTE as well as what it read, so a
     # secret that slipped past the first pass still never lands in a file.
@@ -745,7 +753,7 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
             provider_tag=tag, session_ref=ref, date=meta.get("last_active", ""),
             done=secs.get("Done", ""), learnings=secs.get("Learnings & Gotchas", ""),
             outstanding=secs.get("Outstanding", ""), summary=secs.get("Summary", ""),
-            bugs=secs.get("Bugs & Fixes", ""), scribe=scribe,
+            bugs=secs.get("Bugs & Fixes", ""), scribe=scribe, time=clock,
             declined=verdict == "norecord", declined_reason=reason)
         status = "updated" if verdict == "ok" else "no-record"
         return {"uuid": ref, "status": status, "cost": result.cost_usd, "path": str(path),
@@ -766,7 +774,7 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
         last_active=meta.get("last_active", ""), turns=total, seen_chars=len(full),
         done=secs.get("Done", ""), learnings=secs.get("Learnings & Gotchas", ""),
         outstanding=secs.get("Outstanding", ""), summary=secs.get("Summary", ""),
-        bugs=secs.get("Bugs & Fixes", ""), scribe=scribe)
+        bugs=secs.get("Bugs & Fixes", ""), scribe=scribe, time=clock)
     return {"uuid": ref, "status": "ok", "cost": result.cost_usd, "path": str(path),
             "given": len(given_items), "dropped": dropped, "scribe": scribe}
 
