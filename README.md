@@ -386,8 +386,8 @@ nothing already written changes.
   which model wrote it (`## Update — … · scribe claude-haiku-5-5`). To choose your own:
   `automemory config set scribe_model.codex <model>` (see *Settings*). Cheaper scribes are a little less careful;
   if records slip, choose a better one. (Codex reports tokens but not dollars, so its cost
-  shows as unknown.) **⚠ not yet —** opencode's scribe call is failing on working models;
-  under investigation.
+  shows as unknown.) opencode's scribe starts from a throwaway copy of opencode's own
+  database, so it has your provider login; its own session never reaches your history.
 - **Automatic runs do up to 5 sessions at a time,** in the background, so a big backlog
   never stalls you; a manual run offers to do them all (see *Starting on a project…*).
 - **opencode's last session waits for the next one.** opencode has no end-of-session hook,
