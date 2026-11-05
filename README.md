@@ -46,8 +46,8 @@ is renamed to match (and the change is logged). If two sessions get the same nam
 second one gets its id added. The file name is only a label — automemory always finds a
 record by the session id inside it, never by its name.
 
-It's plain markdown. Commit it, keep it local, or gitignore it — your choice. Git is
-never required.
+It's plain markdown. Git is never required — but if the project is a git repo, automemory
+offers once to commit and push the records for you (see *Records in git*).
 
 ---
 
@@ -152,6 +152,7 @@ automemory reconcile --all      # record everything waiting, without asking
 automemory ignore <session-id>  # never record this session (e.g. a throwaway or a test)
 automemory recheck <session-id> # re-read turns the scribe declined, on the next reconcile
 automemory config               # see and change your settings (below)
+automemory git [push|commit|off] # records on their own branch, for this project (below)
 automemory disable              # stop recording this folder (opencode)
 automemory projects             # which folders are on or off
 ```
@@ -300,6 +301,28 @@ After the updates, two record-wide sections:
 thing that changes in place is the top block, which is a "current state" label; its
 history is in `## Changes`. The engine has no code that deletes a record.
 
+### Records in git
+
+Records never go on your code branches: they shouldn't ship with whatever is on `main`.
+Instead they live on their own branch, `agent-records`. Your `agent-records/` folder
+becomes a checkout of that branch (a git *worktree*), hidden from your code branches by
+the repo's local ignore list. You and your agents read it exactly as before.
+
+- **Asked once per project**, only at a terminal (setting up the folder, or your first
+  manual `automemory reconcile`). It shows the remote it would push to and, on GitHub,
+  whether the repo is **public**. The answer defaults to no.
+- **After that, automatic:** every run commits new records there (marked `[skip ci]`, so
+  CI doesn't build for them) and pushes the branch. Your code, your staged changes and
+  your unpushed commits are never touched.
+- **Already committing records on your branch?** The switch carries them over (snapshot
+  first, every file checked), and makes one commit on your branch that stops tracking the
+  folder. It refuses if you have other changes staged, so nothing of yours is swept in.
+- **To see them on GitHub**, pick the `agent-records` branch. On a fresh clone, run
+  `automemory` once to get the folder back.
+- **Change your mind:** `automemory git push`, `automemory git commit` (no push) or
+  `automemory git off`; `automemory git` shows the current state. The `git` setting caps
+  every project (e.g. `automemory config set git commit` never pushes anywhere).
+
 ### Settings
 
 `automemory config` lists every setting, its value, and what it does. Change one with
@@ -309,6 +332,7 @@ They live in `~/.config/automemory/config.json` and apply to every project.
 | Setting | Default | What |
 | --- | --- | --- |
 | `timezone` | `local` | time zone for update headers and record dates: `local`, `UTC`, or a name like `Asia/Singapore` |
+| `git` | `push` | records on their own branch: `off`, `commit`, or `push` (each project is still asked once) |
 | `show_offset` | `on` | the UTC offset after the time (`21:25 +08`) |
 | `show_stretch` | `on` | number each day's updates in a record (`Stretch #2`) |
 | `show_scribe` | `on` | name the model that wrote each update (`scribe …`) |

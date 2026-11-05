@@ -28,6 +28,7 @@ from pathlib import Path
 
 from . import providers, record, reconcile
 from . import settings as prefs  # user preferences (`automemory config`)
+from . import gitsync
 
 # Claude Code hooks: the same command on both events. It returns at once; the
 # catch-up runs detached in the background (a startup hook that ran the scribe in
@@ -436,6 +437,23 @@ def cmd_config(args) -> int:
     return 0
 
 
+def cmd_git(args) -> int:
+    """Set this project's records-branch choice: push / commit / off (asks nothing)."""
+    project = Path.cwd().resolve()
+    if not args.mode:
+        m = gitsync.mode(project)
+        print(f"automemory: records git here = {m or 'not asked yet'}"
+              f" (setting `git` = {prefs.get('git')})")
+        print(f"  folder is the {gitsync.BRANCH} branch: "
+              f"{'yes' if gitsync.is_records_worktree(project / gitsync.FOLDER) else 'no'}")
+        return 0
+    if args.mode == "off":
+        gitsync.save_decision(project, "off")
+        print("automemory: records will no longer be committed here.")
+        return 0
+    return 0 if gitsync.setup(project, args.mode, sys.stdout) else 1
+
+
 def cmd_doctor(_args) -> int:
     """Write one debug file for THIS project — versions, wiring, pending work, its recent
     runs, usage — for an engine-dev session to start from. No transcript text and no
@@ -534,6 +552,9 @@ def cmd_doctor(_args) -> int:
 
 
 def cmd_reconcile(args) -> int:
+    # The one-time records-branch question, only with a person at the terminal.
+    if not getattr(args, "background", False) and sys.stdin.isatty():
+        gitsync.ask(Path.cwd(), sys.stdout)
     return reconcile.main((["--background"] if getattr(args, "background", False) else [])
                           + (["--all"] if getattr(args, "all", False) else []))
 
@@ -722,13 +743,14 @@ automemory records your AI coding sessions in this folder.
     for sessions run in this folder. It never copies or moves them.
   - A separate model call (the "scribe") writes a short record of each session
     into ./agent-records/. Secrets it recognises are scrubbed first.
-  - Records describe the work done here. If you commit agent-records/, that
-    description travels with the repo; keep it local if it shouldn't.
+  - Records describe the work done here. In a git repo you'll be asked separately
+    whether to commit them to their own branch (agent-records) and push it.
   - Each record costs one small model call on your own account.
 """
 
 
-def _ensure_local_ignored(project: Path, target: str = "") -> str:
+def _ensure_local_ignored(project: Path, target: str = "",
+                          note: str = "hook file with this machine's engine path") -> str:
     """Keep the personal hook file out of git via the repo's LOCAL exclude list
     (.git/info/exclude — never committed, affects no one else). '' if not a repo
     or already ignored."""
@@ -748,7 +770,7 @@ def _ensure_local_ignored(project: Path, target: str = "") -> str:
     excl = (project / git_dir.stdout.strip() / "info" / "exclude")
     excl.parent.mkdir(parents=True, exist_ok=True)
     with excl.open("a", encoding="utf-8") as fh:
-        fh.write(f"\n# automemory: hook file with this machine's engine path\n{target}\n")
+        fh.write(f"\n# automemory: {note}\n{target}\n")
     return str(excl)
 
 
@@ -806,6 +828,8 @@ def cmd_setup(args) -> int:
                 print("  git: .codex/hooks.json added to this repo's local ignore list")
         except ValueError as e:
             print(f"  Codex: NOT wired — {e}")
+    if not getattr(args, "yes", False):  # --yes never agrees to push on anyone's behalf
+        gitsync.ask(project, sys.stdout)
     print("\nRecords are written in the background as sessions start and end. "
           "To record right now: automemory reconcile")
     return 0
@@ -839,6 +863,8 @@ def main(argv=None) -> int:
     p_cf.add_argument("action", nargs="?", choices=["show", "set", "reset"], default="show")
     p_cf.add_argument("key", nargs="?", help="setting name, e.g. timezone or scribe_model.codex")
     p_cf.add_argument("value", nargs="?", help="new value (for set)")
+    p_gt = sub.add_parser("git", help="commit / push this project's records on their own branch")
+    p_gt.add_argument("mode", nargs="?", choices=["push", "commit", "off"])
     p_re = sub.add_parser("recheck", help="re-read a session's declined turns on the next run")
     p_re.add_argument("session", nargs="+", help="session id, short id, or record file name")
     args = p.parse_args(argv)
@@ -847,7 +873,7 @@ def main(argv=None) -> int:
     return {
         "init": cmd_init, "status": cmd_status, "peep": cmd_peep, "reconcile": cmd_reconcile,
         "migrate": cmd_migrate, "hook": cmd_hook, "ignore": cmd_ignore, "doctor": cmd_doctor,
-        "recheck": cmd_recheck, "config": cmd_config,
+        "recheck": cmd_recheck, "config": cmd_config, "git": cmd_git,
         "enable": cmd_enable, "disable": cmd_disable, "projects": cmd_projects,
     }[args.cmd](args)
 

@@ -9,7 +9,7 @@ import json
 import os
 from pathlib import Path
 
-# name: (default, kind, what it does). kind: "bool" | "timezone" | "per-tool"
+# name: (default, kind, what it does). kind: "bool" | "timezone" | "per-tool" | "choice:a,b"
 SETTINGS = {
     "timezone": ("local", "timezone",
                  "time zone for update headers and record dates: local (this machine), UTC, "
@@ -17,6 +17,9 @@ SETTINGS = {
     "show_offset": (True, "bool", "show the UTC offset after the time (21:25 +08)"),
     "show_stretch": (True, "bool", "number each day's updates in a record (Stretch #2)"),
     "show_scribe": (True, "bool", "name the model that wrote each update (scribe …)"),
+    "git": ("push", "choice:off,commit,push",
+            "commit records to each project's own `agent-records` branch, and push it — "
+            "asked once per project first; this caps what any project may do"),
     "scribe_model": ({}, "per-tool",
                      "the model that writes records, per tool: claude-code, codex, opencode "
                      "(unset = the tool's cheapest; set with scribe_model.<tool>)"),
@@ -69,6 +72,12 @@ def _parse(name: str, kind: str, raw: str):
         if v in ("off", "false", "no", "0"):
             return False
         raise ValueError(f"{name} is on or off, not {raw!r}")
+    if kind.startswith("choice:"):
+        allowed = kind.split(":", 1)[1].split(",")
+        v = raw.strip().lower()
+        if v not in allowed:
+            raise ValueError(f"{name} is one of: {', '.join(allowed)}")
+        return v
     if kind == "timezone":
         v = raw.strip()
         if v.lower() in ("local", "utc"):

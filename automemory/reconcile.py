@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import dispatch, memory_mirror, progress, providers, record, redact, settings, transcript
+from . import dispatch, gitsync, memory_mirror, progress, providers, record, redact, settings, transcript
 
 DEFAULT_CAP = 5
 # The scribe model is NOT a constant — see providers.py. `DEFAULT_MODEL = "haiku"`
@@ -1023,6 +1023,11 @@ def run(payload: dict, *, provider: str = None, claude_projects_root=None,
                 bits = [f"{n} {w}" for n, w in
                         ((mem.new, "new"), (mem.superseded, "superseded"), (mem.retired, "retired")) if n]
                 out.write(f"automemory: mirrored memory ({', '.join(bits)}).\n")
+
+        # 5. commit (and push) the records on their own branch, if this project said so.
+        line = gitsync.sync(cwd, records_dir)
+        if line:
+            out.write(line + "\n")
 
         return {"providers": [s.name for s in sources], "missing": len(missing),
                 "processed": len(todo), "wrote": wrote, "deferred": len(deferred),
