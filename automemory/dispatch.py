@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -278,6 +279,35 @@ def _parse_oc_stream(stdout: str, model: str) -> DispatchResult:
     return DispatchResult(text=text, cost_usd=cost, usage=tokens, model=model)
 
 
+def _oc_real_db() -> Path:
+    if os.environ.get("OPENCODE_DB"):
+        return Path(os.environ["OPENCODE_DB"])
+    data = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    return Path(data) / "opencode" / "opencode.db"
+
+
+def _oc_seed_db(dest: Path) -> None:
+    """Start the scribe's throwaway store as a COPY of the real one. opencode keeps
+    provider logins in its database: a blank store had none, so every model failed
+    `provider.no-route` (measured 2026-11-06 — sol and luna both failed blank, both
+    answered with the real db and with a copy; the real db's sessions unchanged).
+    The copy is discarded with the temp folder, so the scribe's session still never
+    reaches the real history. No real db (or it won't copy): blank, as before."""
+    real = _oc_real_db()
+    if not real.is_file():
+        return
+    try:
+        src = sqlite3.connect(f"file:{real}?mode=ro", uri=True)  # backup: safe while opencode runs
+        dst = sqlite3.connect(dest)
+        try:
+            src.backup(dst)
+        finally:
+            src.close()
+            dst.close()
+    except sqlite3.Error:
+        dest.unlink(missing_ok=True)
+
+
 def author_opencode(
     transcript_text: str,
     instruction: str,
@@ -310,6 +340,7 @@ def author_opencode(
         env = dict(os.environ)
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(_OC_BLIND_CONFIG)
         env["OPENCODE_DB"] = str(Path(neutral) / "scribe.db")
+        _oc_seed_db(Path(env["OPENCODE_DB"]))
         # The scribe's opencode is a separate process and loads the same global
         # plugins. Without this it would fire session.idle on its own output and
         # the plugin would dispatch another scribe — forever. The opencode
