@@ -27,6 +27,7 @@ import sys
 from pathlib import Path
 
 from . import providers, record, reconcile
+from . import settings as prefs  # user preferences (`automemory config`)
 
 # Claude Code hooks: the same command on both events. It returns at once; the
 # catch-up runs detached in the background (a startup hook that ran the scribe in
@@ -401,6 +402,38 @@ def cmd_recheck(args) -> int:
         else:
             print(f"automemory: {hit.name} — nothing to re-check (no turns past its newest update)")
     return rc
+
+
+def cmd_config(args) -> int:
+    """See and change your preferences — no code, no agent needed."""
+    try:
+        if args.action == "set":
+            if args.value is None:
+                print("usage: automemory config set <setting> <value>")
+                return 2
+            v = prefs.set_value(args.key, args.value)
+            print(f"automemory: {args.key} = {prefs.show(v)}")
+        elif args.action == "reset":
+            prefs.reset(args.key)
+            name = args.key.partition(".")[0]
+            print(f"automemory: {args.key} back to default "
+                  f"({prefs.show(prefs.get(name))})")
+        else:
+            cur, mine = prefs.load(), prefs.stored()
+            print(f"automemory settings — {prefs.path()}\n")
+            for name, (_default, _kind, what) in prefs.SETTINGS.items():
+                mark = "" if name in mine else "  (default)"
+                print(f"  {name} = {prefs.show(cur[name])}{mark}\n      {what}")
+            print("\nChange:  automemory config set <setting> <value>   "
+                  "(e.g. automemory config set timezone UTC)")
+            print("Undo:    automemory config reset <setting>")
+            return 0
+    except (KeyError, ValueError) as e:
+        print(f"automemory: {e.args[0] if e.args else e}")
+        return 2
+    if args.key.partition(".")[0] in ("timezone", "show_offset", "show_stretch", "show_scribe"):
+        print("  applies to updates written from now on; existing records stay as written.")
+    return 0
 
 
 def cmd_doctor(_args) -> int:
@@ -802,6 +835,10 @@ def main(argv=None) -> int:
     p_ig = sub.add_parser("ignore", help="never record these sessions (e.g. eval runs)")
     p_ig.add_argument("session", nargs="+", help="session id(s)")
     p_ig.add_argument("--note", help="why (kept as a comment in the list)")
+    p_cf = sub.add_parser("config", help="see and change your settings (time zone, header, scribe model)")
+    p_cf.add_argument("action", nargs="?", choices=["show", "set", "reset"], default="show")
+    p_cf.add_argument("key", nargs="?", help="setting name, e.g. timezone or scribe_model.codex")
+    p_cf.add_argument("value", nargs="?", help="new value (for set)")
     p_re = sub.add_parser("recheck", help="re-read a session's declined turns on the next run")
     p_re.add_argument("session", nargs="+", help="session id, short id, or record file name")
     args = p.parse_args(argv)
@@ -810,7 +847,7 @@ def main(argv=None) -> int:
     return {
         "init": cmd_init, "status": cmd_status, "peep": cmd_peep, "reconcile": cmd_reconcile,
         "migrate": cmd_migrate, "hook": cmd_hook, "ignore": cmd_ignore, "doctor": cmd_doctor,
-        "recheck": cmd_recheck,
+        "recheck": cmd_recheck, "config": cmd_config,
         "enable": cmd_enable, "disable": cmd_disable, "projects": cmd_projects,
     }[args.cmd](args)
 

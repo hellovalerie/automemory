@@ -29,7 +29,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import providers
+from . import providers, settings
 
 # Built-in tools we explicitly deny (variadic flag must be kept LAST in argv).
 _NO_TOOLS = [
@@ -382,16 +382,10 @@ DISPATCHERS = {"claude-code": author, "opencode": author_opencode, "codex": auth
 
 
 def default_model(provider: str, fallback: str = None):
-    """User's choice (global config `scribe_model: {provider: model}`) > the
+    """User's choice (`automemory config set scribe_model.<tool> <model>`) > the
     provider's default. None = let the provider use its own current model."""
     if fallback is None:
-        try:
-            cfg = Path(os.environ.get("AUTOMEMORY_CONFIG")
-                       or (Path.home() / ".config" / "opencode" / "automemory.json"))
-            chosen = (json.loads(cfg.read_text(encoding="utf-8"))
-                      .get("scribe_model") or {}).get(provider)
-            if chosen:
-                return chosen
-        except (OSError, ValueError, AttributeError):
-            pass
+        chosen = (settings.get("scribe_model") or {}).get(provider)
+        if chosen:
+            return chosen
     return providers.scribe_model(provider, fallback)

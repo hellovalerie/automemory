@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import dispatch, memory_mirror, progress, providers, record, redact, transcript
+from . import dispatch, memory_mirror, progress, providers, record, redact, settings, transcript
 
 DEFAULT_CAP = 5
 # The scribe model is NOT a constant — see providers.py. `DEFAULT_MODEL = "haiku"`
@@ -712,12 +712,15 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
         return {"uuid": ref, "status": "malformed", "cost": result.cost_usd}
 
     meta = source.meta(ref, cwd)
-    # Dates and the update's time are LOCAL to this machine, taken from the stretch's
-    # last turn (transcripts store UTC).
-    day, clock = record.local_stamp(meta.get("last_active_ts", ""))
+    # Dates and the update's time follow the user's settings (`automemory config`;
+    # default: this machine's local time), taken from the stretch's last turn
+    # (transcripts store UTC).
+    prefs = settings.load()
+    day, clock = record.local_stamp(meta.get("last_active_ts", ""), tz=prefs["timezone"],
+                                    offset=prefs["show_offset"])
     if day:
         meta = dict(meta, last_active=day)
-    sday, _ = record.local_stamp(meta.get("started_ts", ""))
+    sday, _ = record.local_stamp(meta.get("started_ts", ""), tz=prefs["timezone"])
     if sday:
         meta = dict(meta, occurred=sday)
     tag = providers.resolve(source.name).file_tag or source.name
@@ -753,7 +756,8 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
             provider_tag=tag, session_ref=ref, date=meta.get("last_active", ""),
             done=secs.get("Done", ""), learnings=secs.get("Learnings & Gotchas", ""),
             outstanding=secs.get("Outstanding", ""), summary=secs.get("Summary", ""),
-            bugs=secs.get("Bugs & Fixes", ""), scribe=scribe, time=clock,
+            bugs=secs.get("Bugs & Fixes", ""), scribe=scribe if prefs["show_scribe"] else "",
+            time=clock, number_stretch=prefs["show_stretch"],
             declined=verdict == "norecord", declined_reason=reason)
         status = "updated" if verdict == "ok" else "no-record"
         return {"uuid": ref, "status": status, "cost": result.cost_usd, "path": str(path),
@@ -774,7 +778,8 @@ def backfill_one(source: _Source, ref: str, records_dir: Path, project: str,
         last_active=meta.get("last_active", ""), turns=total, seen_chars=len(full),
         done=secs.get("Done", ""), learnings=secs.get("Learnings & Gotchas", ""),
         outstanding=secs.get("Outstanding", ""), summary=secs.get("Summary", ""),
-        bugs=secs.get("Bugs & Fixes", ""), scribe=scribe, time=clock)
+        bugs=secs.get("Bugs & Fixes", ""), scribe=scribe if prefs["show_scribe"] else "",
+        time=clock, number_stretch=prefs["show_stretch"])
     return {"uuid": ref, "status": "ok", "cost": result.cost_usd, "path": str(path),
             "given": len(given_items), "dropped": dropped, "scribe": scribe}
 

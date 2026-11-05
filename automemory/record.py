@@ -61,24 +61,32 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def local_stamp(iso: str):
-    """A transcript timestamp (UTC ISO, any precision) → (local date, "HH:MM +08") on
-    this machine. Dates were UTC before 2026-11-05, so work before 08:00 in +08 was
+def local_stamp(iso: str, tz: str = "local", offset: bool = True):
+    """A transcript timestamp (UTC ISO, any precision) → (date, "HH:MM +08") in `tz`:
+    "local" (this machine), "UTC", or a zone name (the `timezone` setting). Dates were UTC before 2026-11-05, so work before 08:00 in +08 was
     dated the day before. ("", "") if unreadable."""
     import datetime as _dt
     m = re.match(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?$",
                  (iso or "").strip())
     if not m:
         return "", ""
-    d, hh, mm, ss, tz = m.groups()
-    tz = "+00:00" if tz in (None, "Z") else (tz if ":" in tz else tz[:3] + ":" + tz[3:])
+    zone = tz or "local"
+    d, hh, mm, ss, tzs = m.groups()
+    tzs = "+00:00" if tzs in (None, "Z") else (tzs if ":" in tzs else tzs[:3] + ":" + tzs[3:])
     try:
-        t = _dt.datetime.fromisoformat(f"{d}T{hh}:{mm}:{ss or '00'}{tz}").astimezone()
-    except ValueError:
+        t = _dt.datetime.fromisoformat(f"{d}T{hh}:{mm}:{ss or '00'}{tzs}")
+        if zone == "local":
+            t = t.astimezone()
+        elif zone.upper() == "UTC":
+            t = t.astimezone(_dt.timezone.utc)
+        else:
+            from zoneinfo import ZoneInfo
+            t = t.astimezone(ZoneInfo(zone))
+    except Exception:  # unreadable stamp or unknown zone: no time rather than a wrong one
         return "", ""
     off = t.strftime("%z")
     off = off[:3] if off.endswith("00") else f"{off[:3]}:{off[3:]}"
-    return t.strftime("%Y-%m-%d"), t.strftime("%H:%M ") + off
+    return t.strftime("%Y-%m-%d"), t.strftime("%H:%M") + (f" {off}" if offset else "")
 
 
 def today() -> str:
@@ -394,7 +402,7 @@ def write_record(records_dir, *, provider: str, provider_tag: str, session_ref: 
                  session_started: str, last_active: str = "", turns: int = 0, seen_chars: int = 0,
                  done: str, learnings: str = "", outstanding: str = "",
                  summary: str = "", bugs: str = "", captured: str = "", scribe: str = "",
-                 time: str = "") -> Path:
+                 time: str = "", number_stretch: bool = True) -> Path:
     """Create a session's record. `done` is mandatory — it IS the write-gate.
     A session that already has a record must use `append_update` instead."""
     if not (done and done.strip()):
@@ -414,7 +422,7 @@ def write_record(records_dir, *, provider: str, provider_tag: str, session_ref: 
         "captured": captured or now_iso(), "subject": slug(subject), "status": "open",
     }
     block = update_block(session_started if not last_active else last_active, 1, turns, scribe=scribe,
-                         time=time, stretch=1 if time else 0,
+                         time=time, stretch=1 if time and number_stretch else 0,
                          done=done, summary=summary, bugs=bugs, learnings=learnings,
                          outstanding=outstanding)
     body = "\n" + block + "\n\n## Edits\nnone\n"
@@ -430,7 +438,8 @@ def append_update(path, *, turns_from: int, turns_to: int, title: str, seen_char
                   provider_tag: str, session_ref: str, done: str = "",
                   learnings: str = "", outstanding: str = "", date: str = "",
                   summary: str = "", bugs: str = "", captured: str = "", scribe: str = "",
-                  declined: bool = False, declined_reason: str = "", time: str = "") -> Path:
+                  declined: bool = False, declined_reason: str = "", time: str = "",
+                  number_stretch: bool = True) -> Path:
     """Continue a record exactly where it left off.
 
     - A dated `## Update — <date> · turns A–B` block, only if the scribe found
@@ -446,7 +455,8 @@ def append_update(path, *, turns_from: int, turns_to: int, title: str, seen_char
     fm, body = _split(path.read_text(encoding="utf-8"))
 
     if done and done.strip():
-        stretch = len(re.findall(rf"(?m)^## Update — {re.escape(date)}\b", body)) + 1 if time else 0
+        stretch = len(re.findall(rf"(?m)^## Update — {re.escape(date)}\b", body)) + 1 \
+            if time and number_stretch else 0
         block = update_block(date, turns_from, turns_to, scribe=scribe, done=done, summary=summary,
                              time=time, stretch=stretch,
                              bugs=bugs, learnings=learnings, outstanding=outstanding)

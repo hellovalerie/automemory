@@ -151,6 +151,7 @@ automemory peep                 # print the index
 automemory reconcile --all      # record everything waiting, without asking
 automemory ignore <session-id>  # never record this session (e.g. a throwaway or a test)
 automemory recheck <session-id> # re-read turns the scribe declined, on the next reconcile
+automemory config               # see and change your settings (below)
 automemory disable              # stop recording this folder (opencode)
 automemory projects             # which folders are on or off
 ```
@@ -299,6 +300,23 @@ After the updates, two record-wide sections:
 thing that changes in place is the top block, which is a "current state" label; its
 history is in `## Changes`. The engine has no code that deletes a record.
 
+### Settings
+
+`automemory config` lists every setting, its value, and what it does. Change one with
+`automemory config set <setting> <value>`; undo with `automemory config reset <setting>`.
+They live in `~/.config/automemory/config.json` and apply to every project.
+
+| Setting | Default | What |
+| --- | --- | --- |
+| `timezone` | `local` | time zone for update headers and record dates: `local`, `UTC`, or a name like `Asia/Singapore` |
+| `show_offset` | `on` | the UTC offset after the time (`21:25 +08`) |
+| `show_stretch` | `on` | number each day's updates in a record (`Stretch #2`) |
+| `show_scribe` | `on` | name the model that wrote each update (`scribe …`) |
+| `scribe_model.<tool>` | the tool's cheapest | the model that writes records, for `claude-code`, `codex` or `opencode` |
+
+Settings shape updates written from then on. Records are never rewritten, so older
+updates keep the header they were written with.
+
 ### Declined sessions
 
 The scribe only writes a record if it can fill `### Done` with something durable. A session
@@ -336,9 +354,8 @@ nothing already written changes.
 
   If that isn't available, it falls back to the model your session ran on, then the
   tool's default, so recording never stops because a model went away. Each update says
-  which model wrote it (`## Update — … · scribe claude-haiku-5-5`). To choose your own,
-  set `scribe_model` in `~/.config/opencode/automemory.json`, e.g.
-  `{"scribe_model": {"codex": "gpt-6-luna"}}`. Cheaper scribes are a little less careful;
+  which model wrote it (`## Update — … · scribe claude-haiku-5-5`). To choose your own:
+  `automemory config set scribe_model.codex <model>` (see *Settings*). Cheaper scribes are a little less careful;
   if records slip, choose a better one. (Codex reports tokens but not dollars, so its cost
   shows as unknown.) **⚠ not yet —** opencode's scribe call is failing on working models;
   under investigation.
