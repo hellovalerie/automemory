@@ -714,6 +714,15 @@ def reorder_updates(path, date: str = "") -> bool:
 # dropped item is detected exactly rather than by matching reworded text.
 
 ITEM_ID = re.compile(r"\[o(\d+)\]")
+# An item's OWN id leads it (after the bullet and any ✓ closed: / ⏸ parked: marker). Ids
+# quoted later in the text are mentions: found 2026-11-05, an item quoting "`[o1]` in
+# another project" never got an id of its own. (Scribes sometimes echo a second bullet.)
+_LEAD_ID = re.compile(r"^\s*[-*]\s*(?:(?:✓ closed|⏸ parked):\s*)?(?:[-*]\s*)?\[o(\d+)\]")
+
+
+def item_id(line: str):
+    """The item's own id match (group(1) is the number, "12"), or None."""
+    return _LEAD_ID.search(line)
 STATUS_NAME = "STATUS.md"
 
 
@@ -774,7 +783,7 @@ def with_ids(items: list, next_id: int):
     """Give each open item without an id the next one. Returns (items, next_id)."""
     out = []
     for it in items:
-        if not ITEM_ID.search(it):
+        if not item_id(it):
             it = _tag(it, f"[o{next_id}]")
             next_id += 1
         out.append(it)
@@ -803,9 +812,9 @@ def settle_outstanding(given: list, returned: str, next_id: int):
     opened = [l for l in bullets if l not in closed]
     # A scribe that carries or closes an item but forgets its id would otherwise make
     # a duplicate (and a false "carried by the engine"). Match by wording, reuse the id.
-    by_text = {_item_text(g): ITEM_ID.search(g).group(0) for g in given if ITEM_ID.search(g)}
+    by_text = {_item_text(g): f"[o{item_id(g).group(1)}]" for g in given if item_id(g)}
     def _adopt(l, closing):
-        if ITEM_ID.search(l):
+        if item_id(l):
             return l
         body = l.strip().lstrip("-* ")
         core = body.split("closed:", 1)[1].split(" — ", 1)[0] if closing and "closed:" in body else body
@@ -818,9 +827,9 @@ def settle_outstanding(given: list, returned: str, next_id: int):
     opened = [_adopt(l, False) for l in opened]
     closed = [_adopt(l, True) for l in closed]
     opened, next_id = with_ids(opened, next_id)
-    seen = {m.group(1) for l in opened + closed for m in ITEM_ID.finditer(l)}
+    seen = {m.group(1) for l in opened + closed if (m := item_id(l))}
     dropped = [g for g in given
-               if (m := ITEM_ID.search(g)) and m.group(1) not in seen]
+               if (m := item_id(g)) and m.group(1) not in seen]
     carried = [g.rstrip() + " _(carried by the engine: this stretch didn't mention it)_"
                for g in dropped]
     return "\n".join(opened + carried + closed), dropped, next_id

@@ -851,14 +851,14 @@ def open_items_text(records_dir: Path) -> str:
     if not listed:
         return ""
     items = [i for i in listed if not record.is_parked(i)]
-    parked = [record.ITEM_ID.search(i) for i in listed if record.is_parked(i)]
+    parked = [record.item_id(i) for i in listed if record.is_parked(i)]
     items = ([i for i in items if "**You:**" in i] + [i for i in items if "**You:**" not in i])
     out = [f"=== automemory: open items (project · as of {date} · {src}) ==="]
     out += items[:OPEN_LINES]
     if len(items) > OPEN_LINES:
         out.append(f"  … {len(items) - OPEN_LINES} more — agent-records/STATUS.md")
     if parked:
-        ids = " ".join(m.group(0) for m in parked if m)
+        ids = " ".join(f"[o{m.group(1)}]" for m in parked if m)
         out.append(f"  ⏸ {len(parked)} parked ({ids}) — on hold by decision; agent-records/STATUS.md")
     # Nobody looked at the list after session start (owner, 2026-11-05) — so it grew
     # stale. The live agent is the one who can raise it with the person.
