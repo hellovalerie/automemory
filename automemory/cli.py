@@ -496,7 +496,9 @@ def cmd_doctor(_args) -> int:
         L.append(f"- records: {len(files)}; newest: "
                  f"{max(files, key=lambda p: p.stat().st_mtime).name if files else '—'}")
         items, src, date = record.project_open_list(recs)
-        L.append(f"- open items: {len(items)} (as of {date or '—'}, from {src or '—'})")
+        n_parked = sum(record.is_parked(i) for i in items)
+        L.append(f"- open items: {len(items) - n_parked}" + (f" (+{n_parked} parked)" if n_parked else "")
+                 + f" (as of {date or '—'}, from {src or '—'})")
         dec = record._declined_load(recs)
         L.append(f"- ignored sessions: {len(record.ignored_sessions(recs))}; declined: {len(dec)}")
         for ref, e in list(dec.items())[-10:]:

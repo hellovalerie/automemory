@@ -845,15 +845,25 @@ OPEN_LINES = 15  # keep the start-of-session context small
 def open_items_text(records_dir: Path) -> str:
     """The project's open list — the newest one written anywhere, across sessions and
     tools — so the live agent can act on it and the next update can close items.
-    Items for the person first. Full list and recent closures: STATUS.md."""
-    items, src, date = record.project_open_list(records_dir)
-    if not items:
+    Items for the person first; parked items as one line. Full list, parked items and
+    recent closures: STATUS.md."""
+    listed, src, date = record.project_open_list(records_dir)
+    if not listed:
         return ""
+    items = [i for i in listed if not record.is_parked(i)]
+    parked = [record.ITEM_ID.search(i) for i in listed if record.is_parked(i)]
     items = ([i for i in items if "**You:**" in i] + [i for i in items if "**You:**" not in i])
     out = [f"=== automemory: open items (project · as of {date} · {src}) ==="]
     out += items[:OPEN_LINES]
     if len(items) > OPEN_LINES:
         out.append(f"  … {len(items) - OPEN_LINES} more — agent-records/STATUS.md")
+    if parked:
+        ids = " ".join(m.group(0) for m in parked if m)
+        out.append(f"  ⏸ {len(parked)} parked ({ids}) — on hold by decision; agent-records/STATUS.md")
+    # Nobody looked at the list after session start (owner, 2026-11-05) — so it grew
+    # stale. The live agent is the one who can raise it with the person.
+    out.append("At a natural checkpoint (something shipped, concluded or set aside), review "
+               "this list with the person: what is done, what to park, what is next.")
     return "\n".join(out) + "\n\n"
 
 

@@ -28,7 +28,13 @@ you're given carry ids like `[o12]`:
 - for each earlier item this stretch resolved, write `✓ closed: [oN] <the item's exact wording> — <how>`;
 - write new items WITHOUT an id — ids are added for you;
 - start an item with `**You:**` when it's for the person, not the agent: something
-  they said they would check, verify, decide or do themselves.
+  they said they would check, verify, decide or do themselves;
+- when the person puts an item on hold (suspend it, wait for data, "later"), write
+  `⏸ parked: [oN] <the item's exact wording> — <why>`. Carry `⏸ parked:` items forward
+  exactly as given; when the person picks one up again, write it as a plain open item
+  with its id;
+- when an item is now tracked as a GitHub issue, close it:
+  `✓ closed: [oN] <the item's exact wording> — tracked in #N`.
 
 Rules:
 - **Write-gate:** if the session produced no concrete Done — pure Q&A, reading, or

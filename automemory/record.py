@@ -337,8 +337,9 @@ def update_block(date: str, turns_from: int, turns_to: int, *, done: str,
 
 def latest_outstanding(body: str) -> list:
     """The current open list: the newest update's `### Outstanding` bullets, minus
-    `✓ closed:` lines. (Each update restates every still-open item, so the newest
-    one alone is the current state.) Legacy shape: the top-level `## Outstanding`."""
+    `✓ closed:` lines. Parked items (`⏸ parked:`) stay in it — on hold, not done.
+    (Each update restates every still-open item, so the newest one alone is the
+    current state.) Legacy shape: the top-level `## Outstanding`."""
     for sec in _top_sections(body):
         if _UPDATE.match(sec) or sec.startswith("## Outstanding"):
             m = (re.search(r"(?ms)^### Outstanding\s*\n(.*?)(?=^#{2,3} |\Z)", sec)
@@ -753,12 +754,28 @@ def project_open_list(records_dir):
     return latest_outstanding(best[2]), best[1], _top_update_date(best[2])
 
 
+# Parked (owner, 2026-11-05): deliberately on hold — not done, not to be worked on
+# until the person picks it up again. Carried like any open item, but session start
+# shows parked items as one line, so a suspended task stops reading as a to-do.
+PARKED = "⏸ parked:"
+
+
+def is_parked(line: str) -> bool:
+    return line.strip().lstrip("-* ").startswith(PARKED)
+
+
+def _tag(line: str, tag: str) -> str:
+    """Put an id on an item, after the bullet and any `⏸ parked:` marker."""
+    return re.sub(rf"^(\s*[-*]\s*(?:{re.escape(PARKED)}\s*)?)", lambda m: f"{m.group(1)}{tag} ",
+                  line, count=1)
+
+
 def with_ids(items: list, next_id: int):
     """Give each open item without an id the next one. Returns (items, next_id)."""
     out = []
     for it in items:
         if not ITEM_ID.search(it):
-            it = re.sub(r"^(\s*[-*]\s*)", lambda m: f"{m.group(1)}[o{next_id}] ", it, count=1)
+            it = _tag(it, f"[o{next_id}]")
             next_id += 1
         out.append(it)
     return out, next_id
@@ -768,6 +785,8 @@ def _item_text(line: str) -> str:
     """An item's wording, comparable: no bullet, id, markup, engine note or case."""
     t = ITEM_ID.sub("", line).strip().lstrip("-* ")
     t = t.split(" _(carried by the engine", 1)[0]
+    if t.startswith(PARKED):  # parking keeps the item; compare what's after the marker
+        t = t[len(PARKED):].split(" — ", 1)[0]
     t = re.sub(r"[*`_]", "", t).lower()
     return re.sub(r"\s+", " ", t).strip()
 
@@ -795,7 +814,7 @@ def settle_outstanding(given: list, returned: str, next_id: int):
             return l
         if closing:
             return l.replace("closed:", f"closed: {tag}", 1)
-        return re.sub(r"^(\s*[-*]\s*)", lambda m: f"{m.group(1)}{tag} ", l, count=1)
+        return _tag(l, tag)
     opened = [_adopt(l, False) for l in opened]
     closed = [_adopt(l, True) for l in closed]
     opened, next_id = with_ids(opened, next_id)
@@ -811,7 +830,9 @@ def rebuild_status(records_dir, recent: int = 15) -> Path:
     """STATUS.md — generated, never hand-edited: the project's open list and the most
     recently closed items, each closure linked to the record that closed it."""
     records_dir = Path(records_dir)
-    items, src, date = project_open_list(records_dir)
+    listed, src, date = project_open_list(records_dir)
+    items = [i for i in listed if not is_parked(i)]
+    parked = [i for i in listed if is_parked(i)]
     closures = []
     for p, fm, body in _records(records_dir):
         for sec in _top_sections(body):
@@ -827,6 +848,10 @@ def rebuild_status(records_dir, recent: int = 15) -> Path:
            "Generated from the records — do not hand-edit.", "",
            f"## Open ({len(items)})" + (f" — as of {date}, from [{src}]({src})" if src else ""), ""]
     out += items or ["_(nothing open)_"]
+    if parked:
+        out += ["", f"## Parked ({len(parked)})", "",
+                "On hold by decision — picked up again when someone mentions them.", ""]
+        out += parked
     out += ["", f"## Recently closed", ""]
     out += [f"- {d} · {prov} · [{name}]({name}) — {txt}" for d, prov, name, txt in closures[:recent]] \
         or ["_(nothing closed yet)_"]

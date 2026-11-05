@@ -289,6 +289,11 @@ Inside it:
   so nothing silently disappears. Items for **you** (something you said you'd check or
   decide) start with **You:** and are listed first. This is the list shown when a session
   starts; `agent-records/STATUS.md` shows it plus what was recently closed.
+  Tell your agent to put an item on hold and it is **parked** (`⏸ parked: [o12] … — why`):
+  kept, but shown as one line until you pick it up again. An item that becomes a GitHub
+  issue is closed as `— tracked in #N`. The session-start list also asks your agent to
+  review it with you whenever something ships or wraps up; that conversation is how the
+  list gets edited.
 
 After the updates, two record-wide sections:
 
